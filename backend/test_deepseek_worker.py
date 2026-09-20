@@ -31,7 +31,9 @@ from deepseek_review import (  # noqa: E402
 from deepseek_worker import (  # noqa: E402
     MIN_RUNWAY_SECONDS,
     DeepSeekReviewWorker,
+    artifact_timestamp,
     build_review_messages,
+    match_compact_json,
 )
 
 HOLIDAYS = {"2026-10-01"}
@@ -76,6 +78,7 @@ class StubClient:
         tools=None,
         tool_choice=None,
         thinking=None,
+        user_id=None,
     ):
         StubClient.calls.append({
             "messages": messages,
@@ -84,6 +87,7 @@ class StubClient:
             "model": self.model,
             "tools": tools,
             "thinking": thinking,
+            "user_id": user_id,
         })
         if StubClient.behavior == "network_error":
             raise DeepSeekRequestError("DeepSeek HTTP 500: upstream failure")
@@ -390,6 +394,179 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_output_readers_return_none_before_generation(self):
         self.assertIsNone(self.worker.read_output(9999))
+
+    def test_artifact_timestamp_uses_an_explicit_timezone(self):
+        # 2026-09-20 13:06:30 UTC must be reported as 21:06:30 in Beijing.
+        epoch = int(dt.datetime(2026, 9, 20, 13, 6, 30, tzinfo=dt.timezone.utc).timestamp())
+        self.assertEqual(artifact_timestamp(epoch), "2026-09-20 21:06:30")
+
+    def test_markdown_artifact_labels_its_timezone_and_usage(self):
+        import deepseek_worker as worker_module
+
+        payload = {
+            "match_id": 9005766439,
+            "model": "deepseek-flash",
+            "billing_window": "off_peak",
+            "generated_at": int(
+                dt.datetime(2026, 9, 20, 13, 6, 30, tzinfo=dt.timezone.utc).timestamp()
+            ),
+            "prompt": {"revision": 1},
+            "usage": {"total_tokens": 475369},
+            "content_markdown": "# 一句话结论\n",
+        }
+        markdown = worker_module.DeepSeekReviewWorker._markdown_artifact(payload)
+        self.assertIn("生成时间：2026-09-20 21:06:30（北京时间）", markdown)
+        self.assertIn("475369", markdown)
+        self.assertNotIn("本机时区", markdown)
+
+    # ----- compact companion context ----------------------------------
+
+    @staticmethod
+    def bulky_match(match_id):
+        return {
+            "match_id": match_id,
+            "start_time": 1789831103,
+            "duration": 2735,
+            "radiant_win": True,
+            "gold_adv": list(range(2000)),
+            "objectives": [{"time": t, "type": "CHAT_MESSAGE", "key": "x" * 50} for t in range(200)],
+            "teamfights": [{
+                "start": 900, "end": 945, "deaths": 4,
+                "players": [{"player_slot": s, "deaths": 1, "damage": 100, "gold_delta": 50,
+                             "xp_delta": 30, "buybacks": 0} for s in range(10)],
+            }],
+            "players": [
+                {"account_id": 212121467, "player_slot": 0, "hero_id": 89, "kills": 9,
+                 "deaths": 1, "assists": 10, "net_worth": 34935, "gold_per_min": 769,
+                 "hero_damage": 62520, "tower_damage": 7663,
+                 "teamfight_participation": 0.5135, "personaname": "leaky"},
+                *[{"account_id": 1000 + s, "player_slot": s, "hero_id": s, "kills": 1}
+                  for s in range(1, 10)],
+            ],
+            "radiant_gold_adv": list(range(3000)),
+            "radiant_xp_adv": list(range(3000)),
+        }
+
+    def test_compact_companion_json_is_much_smaller_but_keeps_the_facts(self):
+        full = self.bulky_match(9001)
+        compact = match_compact_json(full, 212121467)
+        full_size = len(json.dumps(full, ensure_ascii=False))
+        compact_size = len(json.dumps(compact, ensure_ascii=False))
+        self.assertLess(compact_size, full_size * 0.35)
+        self.assertEqual(compact["own_player"]["hero_id"], 89)
+        self.assertEqual(compact["own_player"]["gold_per_min"], 769)
+        self.assertEqual(compact["own_player"]["teamfight_participation"], 0.5135)
+        self.assertEqual(len(compact["scoreboard"]), 10)
+        self.assertEqual(len(compact["teamfights"]), 1)
+        self.assertLessEqual(len(compact["objectives"]), 120)
+        # Player names must not survive into the comparison payload.
+        self.assertNotIn("personaname", json.dumps(compact, ensure_ascii=False))
+
+    def test_teamfight_detail_uses_the_owner_index_when_slots_are_absent(self):
+        """Real parsed payloads have positional teamfights with no player_slot."""
+        match = {
+            "match_id": 9006610271,
+            "duration": 2735,
+            "players": [
+                {"account_id": 111, "player_slot": 0, "hero_id": 108},
+                {"account_id": 222, "player_slot": 1, "hero_id": 20},
+                {"account_id": 212121467, "player_slot": 2, "hero_id": 89},
+            ],
+            "teamfights": [{
+                "start": 354,
+                "end": 396,
+                "deaths": 4,
+                "players": [
+                    {"damage": 970, "ability_uses": {"some_other_hero_spell": 1}},
+                    {"damage": 500, "ability_uses": {"another_spell": 1}},
+                    {"damage": 0, "ability_uses": {"naga_siren_mirror_image": 1},
+                     "item_uses": {"madstone_bundle": 1}, "gold_delta": 851},
+                ],
+            }],
+        }
+        compact = match_compact_json(match, 212121467)
+        detail = compact["own_player"]["teamfight_detail"]
+        self.assertEqual(len(detail), 1)
+        # Index 2 is the owner, so the third entry must be selected -- not the
+        # first entry and not an empty list.
+        self.assertEqual(detail[0]["damage"], 0)
+        self.assertEqual(detail[0]["ability_uses"], {"naga_siren_mirror_image": 1})
+        self.assertEqual(detail[0]["gold_delta"], 851)
+        self.assertEqual(detail[0]["fight_start"], 354)
+        self.assertEqual(len(compact["teamfights"][0]["owner_detail"]), 1)
+        self.assertEqual(compact["teamfights"][0]["owner_detail"][0]["damage"], 0)
+        # Other players' ability maps are not carried.
+        self.assertNotIn("some_other_hero_spell", json.dumps(compact, ensure_ascii=False))
+
+    def test_teamfight_detail_prefers_player_slot_when_present(self):
+        match = {
+            "match_id": 1,
+            "players": [
+                {"account_id": 111, "player_slot": 0, "hero_id": 1},
+                {"account_id": 212121467, "player_slot": 128, "hero_id": 89},
+            ],
+            "teamfights": [{
+                "start": 100, "end": 140, "deaths": 2,
+                "players": [
+                    {"player_slot": 0, "damage": 111},
+                    {"player_slot": 128, "damage": 999},
+                ],
+            }],
+        }
+        compact = match_compact_json(match, 212121467)
+        self.assertEqual(compact["own_player"]["teamfight_detail"][0]["damage"], 999)
+
+    def test_compact_json_handles_a_missing_own_row(self):
+        compact = match_compact_json(self.bulky_match(9002), 999999)
+        self.assertIsNone(compact["own_player"])
+        self.assertEqual(len(compact["scoreboard"]), 10)
+
+    def test_compact_json_tolerates_missing_sections(self):
+        compact = match_compact_json({"match_id": 9003}, 212121467)
+        self.assertIsNone(compact["own_player"])
+        self.assertEqual(compact["scoreboard"], [])
+        self.assertEqual(compact["objectives"], [])
+        self.assertEqual(compact["teamfights"], [])
+        self.assertEqual(compact["radiant_gold_adv_sample"], [])
+
+    def test_economy_series_is_sampled_not_dropped(self):
+        compact = match_compact_json(self.bulky_match(9004), 212121467)
+        self.assertGreater(len(compact["radiant_gold_adv_sample"]), 0)
+        self.assertLessEqual(len(compact["radiant_gold_adv_sample"]), 13)
+
+    def test_default_settings_use_compact_companions(self):
+        settings = self.jobs.settings()
+        self.assertEqual(settings["companion_detail"], "compact")
+        self.assertEqual(settings["context_budget_chars"], 700000)
+
+    def test_campaign_sends_compact_companions_by_default(self):
+        self.prompts.create_revision("# prompt")
+        self.jobs.update_settings({"auto_review_enabled": True, "batch_size": 3})
+        self.worker.tick()
+        prompt = StubClient.calls[0]["messages"][1]["content"]
+        self.assertIn("同批比赛", prompt)
+
+    def test_companions_are_pruned_when_over_the_budget(self):
+        self.prompts.create_revision("# prompt")
+        self.jobs.update_settings({
+            "auto_review_enabled": True,
+            "batch_size": 1,
+            "companion_detail": "full",
+            "context_budget_chars": 100000,
+        })
+        # The target match alone blows the budget, so every companion must go
+        # while the target itself is still analysed.
+        bulky = self.bulky_match(9001)
+        bulky["objective_notes"] = "x" * 200000
+        self.matches[9001] = bulky
+        owned = self.worker.read_output(9001)
+        self.worker.tick()
+        payload = self.worker.read_output(9001)
+        self.assertIsNotNone(payload, f"no output written (previous={owned})")
+        self.assertEqual(payload["context"]["companions_included"], 0)
+        self.assertEqual(payload["context"]["companions_pruned_for_budget"], 2)
+        self.assertFalse(payload["context"]["target_match_truncated"])
+        self.assertGreater(payload["context"]["prompt_chars"], 200000)
 
 
 if __name__ == "__main__":

@@ -406,6 +406,7 @@ class DeepSeekClient:
         tools: list[dict] | None = None,
         tool_choice: str | None = None,
         thinking: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         import httpx
 
@@ -424,6 +425,9 @@ class DeepSeekClient:
             payload["tools"] = tools
             # `required` and named tool choices return 400 in thinking mode.
             payload["tool_choice"] = tool_choice or "auto"
+        if user_id:
+            # Also isolates the context/KV cache per job class.
+            payload["user_id"] = str(user_id)[:512]
         try:
             response = httpx.post(
                 f"{self.base_url}/chat/completions",
@@ -559,6 +563,8 @@ DEFAULT_SETTINGS = {
     "enable_web_search": False,
     "max_search_calls": 5,
     "reasoning_effort": "high",
+    "companion_detail": "compact",
+    "context_budget_chars": 700000,
     "last_run_at": None,
     "last_result": None,
     "next_planned_at": None,
@@ -623,8 +629,14 @@ class ReviewJobStore:
                     value = max(512, min(int(value), 384000))
                 if key == "max_search_calls":
                     value = max(0, min(int(value), 20))
+                if key == "context_budget_chars":
+                    value = max(100000, min(int(value), 5_000_000))
                 if key == "temperature":
                     value = max(0.0, min(float(value), 2.0))
+                if key == "companion_detail":
+                    value = str(value)
+                    if value not in {"compact", "full"}:
+                        value = "compact"
                 if key == "reasoning_effort":
                     value = str(value)
                     if value not in {"none", "low", "high", "max"}:

@@ -105,6 +105,30 @@ DeepSeek 官方规则：**峰时为 UTC 01:00–04:00 与 06:00–10:00，周一
 已经生成过初步解析的比赛仍占用名额，因此自动复盘不会向更早的比赛扩散；
 需要更早的比赛时，在网页上对该场单独「单场排队」。
 
+### 上下文预算与实测成本
+
+一场完整解析 JSON 约 300–550 KB。如果把它连同两场同批比赛一起发送，
+单场请求约 46.8 万 input token。因此默认使用 `companion_detail=compact`：
+同批比赛改发「紧凑视图」——主人自己的完整行、十人计分板、目标事件、
+抽样的经济曲线，以及**主人所在位置在每一波团战里的技能/物品使用、击杀、
+治疗与金钱变化**（这是复盘最常引用的证据）。实测紧凑视图约为完整 JSON 的
+10.6%，同时保留关键证据。
+
+实测（deepseek-flash，错峰，最近 3 场一批）：
+
+| 配置 | 单场 input token | 单场成本 | 3 场合计 |
+| --- | --- | --- | --- |
+| 同批发完整 JSON | ~468,000 | ~$0.075 | $0.2244 |
+| 同批发紧凑视图（默认） | ~187,000 | ~$0.012 | $0.0347 |
+
+也就是**每场约 1 美分**。想进一步省钱可以：
+
+- `reasoning_effort` 改为 `low` 或 `none`（输出 token 会明显下降）；
+- `batch_size` 改为 1（只算最近一场，不再附同批对比）；
+- `context_budget_chars` 调小（默认 700000，超出时优先丢弃同批比赛）。
+
+同批比赛只用于横向对比，所以丢弃它们不会影响本场结论。
+
 ### 端点
 
 ```
@@ -197,8 +221,26 @@ scp -r dist/client/* aliyun-ecs:/usr/share/nginx/html/dota2/
 | `DOTA2_SEARCH_API_KEY` / `_FILE` | 空 | 搜索凭据 |
 | `DOTA2_SEARCH_ENDPOINT` | 空 | SearXNG / 自定义端点 |
 | `DOTA2_ALLOWED_ORIGINS` | 空 | 额外允许的写入源（本地开发用） |
+| `DOTA2_ARTIFACT_TZ_OFFSET` | `8` | 产物时间戳的时区偏移（小时） |
+| `DOTA2_ARTIFACT_TZ_LABEL` | `北京时间` | 产物时间戳的时区标签 |
+| `DOTA2_CONTEXT_BUDGET_CHARS` | `700000` | 默认上下文预算（可被设置覆盖） |
+| `DOTA2_ACCOUNT_ID` | `212121467` | 用于在解析数据里定位主人自己的行 |
 
-## 六、测试
+## 六、产物内容
+
+Markdown 产物结尾会写明生成时间（带明确时区，不使用宿主机的 `localtime`，
+因为容器可能报告 CST 而进程仍按 UTC 运行）、模型、计费窗口、Prompt 版本与总 token。
+
+JSON 产物除正文外还包含：
+
+- `usage` / `cost`：token 明细与按错峰或峰时费率计算的估算成本；
+- `context`：同批比赛是否进入、是否因预算被裁剪、本场是否被截断、prompt 字符数；
+- `web_search`：是否启用、是否可用、实际调用轮数与全部引用；
+- `trust_boundary`：数据被当作不可信内容处理的标记。
+
+`/v1/deepseek/status` 也会返回 `stats.estimated_total_usd`，方便长期观察花费。
+
+## 七、测试
 
 ```bash
 cd backend

@@ -14,6 +14,7 @@ The worker is intentionally conservative:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -55,6 +56,164 @@ MAX_OUTPUT_TOKENS_HARD_CAP = 384000
 MIN_RUNWAY_SECONDS = 420
 WORKER_POLL_SECONDS = 60
 MATCH_HISTORY_ROWS = 20
+# Shown in generated artifacts. Server local time is not trusted because a
+# container may report CST while the process still runs on UTC.
+ARTIFACT_TIMEZONE_OFFSET_HOURS = int(os.environ.get("DOTA2_ARTIFACT_TZ_OFFSET", "8"))
+ARTIFACT_TIMEZONE_LABEL = os.environ.get("DOTA2_ARTIFACT_TZ_LABEL", "北京时间")
+# Total prompt character budget. Companion payloads are dropped until the
+# request fits, which keeps one review near a few hundred thousand tokens
+# instead of sending three full parsed matches.
+DEFAULT_CONTEXT_BUDGET_CHARS = int(
+    os.environ.get("DOTA2_CONTEXT_BUDGET_CHARS", "700000")
+)
+# The Owner's Steam account. Used to pick the owner's own row out of a match.
+ACCOUNT_ID = int(os.environ.get("DOTA2_ACCOUNT_ID", "212121467"))
+
+
+def artifact_timestamp(epoch_seconds: int) -> str:
+    """Format a timestamp in an explicit timezone instead of the host's."""
+    moment = dt.datetime.fromtimestamp(
+        int(epoch_seconds), dt.timezone.utc
+    ) + dt.timedelta(hours=ARTIFACT_TIMEZONE_OFFSET_HOURS)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def match_compact_json(match_data: dict, account_id: int) -> dict:
+    """A bounded per-match view used for companion and comparison context.
+
+    A full parsed match JSON is a few hundred kilobytes, and most of it is not
+    needed for cross-match comparison: per-second economy series, positional
+    logs, and every player's full ability-target map. What is kept is the
+    evidence a review actually cites -- the owner's own row, the ten-player
+    scoreboard, objectives, sampled economy curves, and per-teamfight
+    ability/item usage, kills, healing, and gold swings for the owner's slot.
+    """
+    players = match_data.get("players") or []
+    self_row = None
+    for player in players:
+        if player.get("account_id") == account_id:
+            self_row = player
+            break
+
+    keep_player_fields = (
+        "account_id", "player_slot", "hero_id", "is_radiant", "win",
+        "kills", "deaths", "assists", "net_worth", "gold_per_min",
+        "xp_per_min", "last_hits", "denies", "hero_damage", "hero_healing",
+        "tower_damage", "teamfight_participation", "lane", "lane_role",
+        "lane_efficiency_pct", "obs_placed", "sen_placed", "stuns",
+        "purchase_log", "item_0", "item_1", "item_2", "item_3", "item_4", "item_5",
+        "backpack_0", "backpack_1", "backpack_2",
+    )
+    scoreboard = [
+        {key: player.get(key) for key in keep_player_fields if key in player}
+        for player in players
+    ]
+
+    objectives = []
+    for objective in (match_data.get("objectives") or []):
+        objectives.append({
+            "time": objective.get("time"),
+            "type": objective.get("type"),
+            "team": objective.get("team"),
+            "key": objective.get("key"),
+            "player_slot": objective.get("player_slot"),
+            "value": objective.get("value"),
+        })
+
+    def sample(series, points=12):
+        if not isinstance(series, list) or not series:
+            return []
+        step = max(1, len(series) // points)
+        return series[::step]
+
+    def teamfight_detail(entry):
+        detail = {
+            "player_slot": entry.get("player_slot"),
+            "deaths": entry.get("deaths"),
+            "buybacks": entry.get("buybacks"),
+            "damage": entry.get("damage"),
+            "healing": entry.get("healing"),
+            "gold_delta": entry.get("gold_delta"),
+            "xp_delta": entry.get("xp_delta"),
+            "killed": entry.get("killed"),
+            "ability_uses": entry.get("ability_uses"),
+            "item_uses": entry.get("item_uses"),
+        }
+        return {key: value for key, value in detail.items() if value not in (None, {}, [])}
+
+    # A match has ten players. `teamfights[].players` is positional and usually
+    # carries no player_slot at all, so the owner is located by their index in
+    # the players array and that same index is used inside each teamfight.
+    # player_slot is still honoured when a payload does include it.
+    self_index = None
+    self_slot = None
+    for index, player in enumerate(players):
+        if player.get("account_id") == account_id:
+            self_index = index
+            self_slot = player.get("player_slot")
+            break
+
+    def owner_entries(fight):
+        entries = fight.get("players") or []
+        by_slot = [
+            entry for entry in entries
+            if entry.get("player_slot") is not None and entry.get("player_slot") == self_slot
+        ]
+        if by_slot:
+            return by_slot
+        if self_index is not None and self_index < len(entries):
+            return [entries[self_index]]
+        return []
+
+    teamfights = []
+    for fight in (match_data.get("teamfights") or []):
+        selected = (
+            owner_entries(fight)
+            if self_index is not None
+            else (fight.get("players") or [])
+        )
+        teamfights.append({
+            "start": fight.get("start"),
+            "end": fight.get("end"),
+            "deaths": fight.get("deaths"),
+            "last_death": fight.get("last_death"),
+            "owner_detail": [teamfight_detail(entry) for entry in selected],
+        })
+
+    self_compact = None
+    if self_row is not None:
+        self_compact = {
+            key: self_row.get(key)
+            for key in keep_player_fields
+            if key in self_row
+        }
+        # The owner's own teamfight detail is the most citable evidence in the
+        # whole payload, so it is carried for every fight.
+        self_compact["teamfight_detail"] = [
+            {
+                "fight_start": fight.get("start"),
+                "fight_end": fight.get("end"),
+                **teamfight_detail(entry),
+            }
+            for fight in (match_data.get("teamfights") or [])
+            for entry in owner_entries(fight)
+        ]
+
+    return {
+        "match_id": match_data.get("match_id"),
+        "start_time": match_data.get("start_time"),
+        "duration": match_data.get("duration"),
+        "radiant_win": match_data.get("radiant_win"),
+        "game_mode": match_data.get("game_mode"),
+        "lobby_type": match_data.get("lobby_type"),
+        "is_ranked": match_data.get("is_ranked"),
+        "own_player": self_compact,
+        "scoreboard": scoreboard,
+        "objectives": objectives[:120],
+        "radiant_gold_adv_sample": sample(match_data.get("radiant_gold_adv")),
+        "radiant_xp_adv_sample": sample(match_data.get("radiant_xp_adv")),
+        "teamfights": teamfights,
+    }
 
 
 def build_review_messages(
@@ -363,6 +522,7 @@ class DeepSeekReviewWorker:
             return {"job_id": job_id, "status": JOB_FAILED, "error": "match json missing"}
 
         settings = self.job_store.settings()
+        companion_detail = str(settings.get("companion_detail") or "compact")
         companions = []
         index_items = sorted(
             self.index_loader().values(),
@@ -376,9 +536,15 @@ class DeepSeekReviewWorker:
             other = self.match_loader(other_id)
             if not isinstance(other, dict):
                 continue
+            sanitized_other = self.sanitizer(other)
             companions.append({
                 **self.match_summary(item),
-                "json": self.sanitizer(other),
+                "detail": companion_detail,
+                "json": (
+                    sanitized_other
+                    if companion_detail == "full"
+                    else match_compact_json(sanitized_other, ACCOUNT_ID)
+                ),
             })
             if len(companions) >= 2:
                 break
@@ -386,9 +552,25 @@ class DeepSeekReviewWorker:
         recent_matches = [self.match_summary(item) for item in index_items[:MATCH_HISTORY_ROWS]]
         sanitized = self.sanitizer(match_data)
         serialized = json.dumps(sanitized, ensure_ascii=False)
+        target_truncated = False
         if len(serialized) > MAX_MATCH_JSON_CHARS:
             serialized = serialized[:MAX_MATCH_JSON_CHARS]
             sanitized = {"truncated": True, "raw_prefix": serialized}
+            target_truncated = True
+
+        # Keep the whole request inside the configured character budget by
+        # dropping companion payloads first; the target match is never dropped.
+        budget = int(settings.get("context_budget_chars") or DEFAULT_CONTEXT_BUDGET_CHARS)
+        target_chars = len(serialized)
+        pruned_companions = 0
+        while companions:
+            total = target_chars + sum(
+                len(json.dumps(item.get("json"), ensure_ascii=False)) for item in companions
+            )
+            if total <= budget:
+                break
+            companions.pop()
+            pruned_companions += 1
 
         messages = build_review_messages(
             prompt_revision=prompt,
@@ -437,10 +619,22 @@ class DeepSeekReviewWorker:
                     max_tokens=max_tokens,
                     temperature=temperature,
                     thinking=thinking,
+                    user_id="ashfury-dota2-preliminary-review",
                 )
                 result["web_search_used"] = False
                 result["citations"] = []
                 result["search_rounds"] = []
+            LOGGER.info(
+                "DeepSeek usage match=%s prompt_chars=%s prompt_tokens=%s "
+                "cache_hit=%s cache_miss=%s completion=%s finish=%s",
+                match_id,
+                sum(len(str(message.get("content") or "")) for message in messages),
+                (result.get("usage") or {}).get("prompt_tokens"),
+                (result.get("usage") or {}).get("prompt_cache_hit_tokens"),
+                (result.get("usage") or {}).get("prompt_cache_miss_tokens"),
+                (result.get("usage") or {}).get("completion_tokens"),
+                result.get("finish_reason"),
+            )
         except DeepSeekConfigError as error:
             self.job_store.mark(job_id, JOB_FAILED, error=str(error))
             return {"job_id": job_id, "status": JOB_FAILED, "error": str(error)}
@@ -481,6 +675,17 @@ class DeepSeekReviewWorker:
                 "used": bool(result.get("web_search_used")),
                 "citations": result.get("citations") or [],
                 "rounds": result.get("search_rounds") or [],
+            },
+            "context": {
+                "companion_detail": companion_detail,
+                "companions_included": len(companions),
+                "companions_pruned_for_budget": pruned_companions,
+                "target_match_truncated": target_truncated,
+                "target_match_chars": target_chars,
+                "budget_chars": budget,
+                "prompt_chars": sum(
+                    len(str(message.get("content") or "")) for message in messages
+                ),
             },
             "trust_boundary": {
                 "match_json_sanitized": True,
@@ -542,10 +747,11 @@ class DeepSeekReviewWorker:
         )
         footer = (
             "\n\n---\n\n"
-            f"生成时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(payload['generated_at']))}"
-            f"（本机时区）\n\n"
+            f"生成时间：{artifact_timestamp(payload['generated_at'])}"
+            f"（{ARTIFACT_TIMEZONE_LABEL}）\n\n"
             f"模型：`{payload['model']}`｜计费窗口：`{payload['billing_window']}`｜"
-            f"Prompt 版本：`{payload['prompt']['revision']}`\n\n"
+            f"Prompt 版本：`{payload['prompt']['revision']}`"
+            f"｜用量：`{((payload.get('usage') or {}).get('total_tokens'))}` tokens\n\n"
             f"本文件由服务器在 DeepSeek 错峰时段自动生成，属于**初步解析**，"
             f"不替代深度复盘结论。\n"
         )

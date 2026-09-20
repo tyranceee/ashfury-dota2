@@ -171,6 +171,11 @@ class DeepSeekSettingsBody(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=512, le=384000)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     resume_only_off_peak: bool | None = None
+    enable_web_search: bool | None = None
+    max_search_calls: int | None = Field(default=None, ge=0, le=20)
+    reasoning_effort: str | None = Field(default=None, max_length=8)
+    companion_detail: str | None = Field(default=None, max_length=16)
+    context_budget_chars: int | None = Field(default=None, ge=100000, le=5000000)
 
 
 class DeepSeekPromptBody(BaseModel):
