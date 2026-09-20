@@ -130,9 +130,9 @@ function mergeProfiles(workspace, profileData) {
     return {
       ...identity,
       ...scoredProfile,
-      hero_id: scoredProfile.hero_id || identity.hero_id,
-      hero_name: scoredProfile.hero_name || identity.hero_name,
-      hero_image: scoredProfile.hero_image || identity.hero_image,
+      hero_id: identity.hero_id || scoredProfile.hero_id,
+      hero_name: identity.hero_name || scoredProfile.hero_name,
+      hero_image: identity.hero_image || scoredProfile.hero_image,
       relation: scoredProfile.relation || identity.relation,
       is_self: scoredProfile.is_self ?? identity.is_self,
     };

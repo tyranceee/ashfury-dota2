@@ -466,6 +466,25 @@ class TerminalDownloadApiTests(unittest.TestCase):
         self.assertEqual(entry["match"]["kda"], "9/1/10")
         self.assertEqual(entry["match"]["duration"], "45:35")
 
+    def test_bundled_valve_catalog_has_current_chinese_hero_names(self):
+        previous_names = self.server.HERO_MAP
+        previous_images = self.server.HERO_IMAGE_MAP
+        try:
+            self.server.HERO_MAP = None
+            self.server.HERO_IMAGE_MAP = None
+            names = self.server.hero_map()
+            self.assertGreaterEqual(len(names), 127)
+            self.assertEqual(names[29], "潮汐猎人")
+            self.assertEqual(names[53], "自然先知")
+            self.assertEqual(names[89], "娜迦海妖")
+            self.assertEqual(names[135], "破晓辰星")
+            self.assertEqual(names[145], "凯")
+            self.assertEqual(names[155], "朗戈")
+            self.assertTrue(self.server.hero_image_map()[53].endswith("/furion.png"))
+        finally:
+            self.server.HERO_MAP = previous_names
+            self.server.HERO_IMAGE_MAP = previous_images
+
     def test_preliminary_index_is_publicly_listable(self):
         response = self.client.get("/v1/preliminary-reviews")
         self.assertEqual(response.status_code, 200)

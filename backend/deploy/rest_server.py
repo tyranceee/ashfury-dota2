@@ -136,6 +136,8 @@ ROLE_NEXT_REQUEST_AT = 0.0
 ROLE_REQUEST_INTERVAL_SECONDS = 1.25
 
 OD = "https://api.opendota.com/api"
+VALVE_HERO_LIST_URL = "https://www.dota2.com/datafeed/herolist?language=schinese"
+HERO_CATALOG_FILE = Path(__file__).with_name("hero_catalog_zh.json")
 HERO_MAP = None
 HERO_IMAGE_MAP = None
 LOGGER = logging.getLogger("ashfury.owner_review")
@@ -234,24 +236,30 @@ def hero_map():
         return HERO_MAP
 
     try:
-        data = httpx.get(
-            f"{OD}/constants/heroes",
-            timeout=20,
-        ).json()
-
+        catalog = load_json(HERO_CATALOG_FILE, {})
+        heroes = (((catalog.get("result") or {}).get("data") or {}).get("heroes") or [])
+        if not heroes:
+            response = httpx.get(VALVE_HERO_LIST_URL, timeout=20)
+            response.raise_for_status()
+            catalog = response.json()
+            heroes = (((catalog.get("result") or {}).get("data") or {}).get("heroes") or [])
         HERO_MAP = {
-            int(k): v.get("localized_name")
-            for k, v in data.items()
+            int(hero["id"]): str(hero["name_loc"]).strip()
+            for hero in heroes
+            if hero.get("id") is not None and str(hero.get("name_loc") or "").strip()
         }
         HERO_IMAGE_MAP = {
-            int(k): (
-                "https://cdn.cloudflare.steamstatic.com"
-                + str(v.get("img", "")).rstrip("?")
+            int(hero["id"]): (
+                "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/"
+                f"dota_react/heroes/{str(hero['name']).removeprefix('npc_dota_hero_')}.png"
             )
-            for k, v in data.items()
-            if v.get("img")
+            for hero in heroes
+            if hero.get("id") is not None and hero.get("name")
         }
-    except Exception:
+        if not HERO_MAP:
+            raise ValueError("Valve Chinese hero catalog is empty")
+    except Exception as error:
+        LOGGER.warning("Chinese hero catalog unavailable: %s", error)
         HERO_MAP = {}
         HERO_IMAGE_MAP = {}
 
