@@ -444,6 +444,7 @@ function ReviewCenter({
   const promptState = status.prompt || {};
   const jobByMatch = new Map((jobs || []).map((job) => [Number(job.match_id), job]));
   const reviewByMatch = new Map((reviews || []).map((review) => [Number(review.match_id), review]));
+  const matchById = new Map((matches || []).map((match) => [String(match.id), match]));
   const parsedMatches = matches.filter((match) => match.status === "已解析");
   const autoScope = parsedMatches.slice(0, Number(status.batch_size) || 3);
 
@@ -461,6 +462,54 @@ function ReviewCenter({
         <h1>初步解析</h1>
         <p>服务器在 DeepSeek 错峰时段自动跑初步解析，只处理最近 {status.batch_size || 3} 场已解析比赛。错峰费率是峰时的 5 折。</p>
       </div>
+
+      <article className="preliminary-library">
+        <header>
+          <div><CloudCheck size={19} weight="fill" /><h2>已生成的初步解析</h2></div>
+          <small>{reviews.length} 份成果 · 可直接下载</small>
+        </header>
+        {reviews.length ? (
+          <div className="review-file-grid">
+            {reviews.map((review) => {
+              const match = matchById.get(String(review.match_id));
+              const result = match?.result;
+              return (
+                <article key={review.match_id}>
+                  <div className="result-head">
+                    {match?.image && <img src={match.image} alt={`${match.heroZh}英雄头像`} />}
+                    <div className="result-identity">
+                      <span>MATCH {review.match_id}</span>
+                      <h3>
+                        {match?.heroZh || "英雄未同步"}
+                        {result && <em className={result === "胜" ? "win" : "loss"}>{result}</em>}
+                      </h3>
+                    </div>
+                  </div>
+                  <dl className="result-stats">
+                    <div><dt>K / D / A</dt><dd>{match?.kda || "—"}</dd></div>
+                    <div><dt>比赛时长</dt><dd>{match?.duration || "—"}</dd></div>
+                    <div><dt>比赛时间</dt><dd>{match ? formatMatchDate(match.startTime) : "—"}</dd></div>
+                  </dl>
+                  <p className="result-meta">
+                    {review.model || "deepseek-flash"} · {review.billing_window === "off_peak" ? "错峰" : "峰时"}
+                    ｜生成于 {formatBeijing(review.generated_at)}｜Prompt 第 {review.prompt_revision} 版
+                    {review.cost?.cost_cny != null ? `｜¥${review.cost.cost_cny}` : ""}
+                  </p>
+                  <div className="result-actions">
+                    <a href={review.markdown.download_url}><DownloadSimple size={15} />下载 Markdown</a>
+                    <a href={review.json.download_url}><FileText size={15} />下载 JSON</a>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="artifact-empty">
+            <Brain size={24} />
+            <span><strong>还没有生成过初步解析</strong><small>开启自动复盘后，服务器会在最近的错峰时段自动生成。</small></span>
+          </div>
+        )}
+      </article>
 
       <div className="schedule-strip">
         <div className={schedule0.off_peak_now ? "window off-peak" : "window peak"}>
@@ -650,36 +699,6 @@ function ReviewCenter({
           <div className="artifact-empty">
             <FileMagnifyingGlass size={24} />
             <span><strong>还没有已解析比赛</strong><small>比赛解析完成后才会自动进入初步解析队列。</small></span>
-          </div>
-        )}
-      </article>
-
-      <article className="preliminary-library">
-        <header>
-          <div><CloudCheck size={19} weight="fill" /><h2>已生成的初步解析</h2></div>
-          <small>{reviews.length} 份文件 · 支持一键下载</small>
-        </header>
-        {reviews.length ? (
-          <div className="review-file-grid">
-            {reviews.map((review) => (
-              <article key={review.match_id}>
-                <span>MATCH {review.match_id}</span>
-                <h3>{review.model || "deepseek-flash"} · {review.billing_window === "off_peak" ? "错峰" : "峰时"}</h3>
-                <p>
-                  生成于 {formatBeijing(review.generated_at)}｜Prompt 第 {review.prompt_revision} 版
-                  {review.cost?.estimated_usd != null ? `｜约 $${review.cost.estimated_usd}` : ""}
-                </p>
-                <div>
-                  <a href={review.markdown.download_url}><DownloadSimple size={15} />下载 Markdown</a>
-                  <a href={review.json.download_url}><FileText size={15} />下载 JSON</a>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="artifact-empty">
-            <Brain size={24} />
-            <span><strong>还没有生成过初步解析</strong><small>开启自动复盘后，服务器会在最近的错峰时段自动生成。</small></span>
           </div>
         )}
       </article>

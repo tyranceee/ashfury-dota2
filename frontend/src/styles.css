@@ -258,11 +258,23 @@ main { padding: 16px 22px 0; }
 .queue-actions .muted { color: #6f6a62; font-size: 9px; }
 .review-file-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
 .review-file-grid article { border: 1px solid #4e4436; background: rgba(11, 16, 16, .9); padding: 14px; }
-.review-file-grid article > span { color: #8d7351; font: 9px Arial, sans-serif; letter-spacing: .12em; }
-.review-file-grid h3 { margin: 7px 0 5px; color: #ddc59c; font-size: 13px; }
-.review-file-grid p { margin: 0 0 11px; color: #85806f; font-size: 9px; line-height: 1.6; }
-.review-file-grid article > div { display: flex; gap: 7px; flex-wrap: wrap; }
-.review-file-grid a { display: flex; align-items: center; gap: 5px; border: 1px solid #5d5341; color: #d4b47e; padding: 6px 9px; text-decoration: none; font-size: 9px; }
+.review-file-grid h3 { margin: 0; color: #ddc59c; font-size: 15px; }
+.result-head { display: flex; gap: 11px; align-items: center; }
+.result-head img { width: 74px; height: 44px; object-fit: cover; border: 1px solid #6a5a40; flex: none; }
+.result-identity { min-width: 0; }
+.result-identity > span { color: #8d7351; font: 9px Arial, sans-serif; letter-spacing: .12em; }
+.result-identity h3 { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+.result-identity h3 em { font-style: normal; font-size: 10px; padding: 2px 7px; border: 1px solid currentColor; }
+.result-identity h3 em.win { color: #7fdfc6; }
+.result-identity h3 em.loss { color: #e27777; }
+.result-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0 0; }
+.result-stats > div { border: 1px solid #413a2d; padding: 8px 9px; }
+.result-stats dt { color: #857f72; font-size: 8px; letter-spacing: .06em; }
+.result-stats dd { margin: 5px 0 0; color: #ddc59c; font-size: 12px; }
+.result-meta { margin: 10px 0 0; color: #85806f; font-size: 9px; line-height: 1.6; }
+.result-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+.result-actions a { display: flex; align-items: center; gap: 5px; border: 1px solid #5d5341; background: #12191a; color: #d4b47e; padding: 7px 10px; text-decoration: none; font-size: 9px; }
+.result-actions a:hover { border-color: #8f714a; color: #e8cd9d; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(2, 5, 6, .88); }
 .player-dialog, .owner-dialog { position: relative; width: min(670px, 100%); padding: 22px; border: 1px solid #765f40; background: #101617 url("/assets/textures/black-gold-archive.png") center / cover; color: #ded0b9; box-shadow: 0 25px 80px #000; }
