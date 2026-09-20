@@ -496,8 +496,16 @@ function ReviewCenter({
                     {review.cost?.cost_cny != null ? `｜¥${review.cost.cost_cny}` : ""}
                   </p>
                   <div className="result-actions">
-                    <a href={review.markdown.download_url}><DownloadSimple size={15} />下载 Markdown</a>
-                    <a href={review.json.download_url}><FileText size={15} />下载 JSON</a>
+                    <a
+                      className="preview-link"
+                      href={review.markdown.preview_url || `${review.markdown.download_url}?preview=1`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <FileMagnifyingGlass size={15} />预览复盘
+                    </a>
+                    <a href={review.markdown.download_url}><DownloadSimple size={15} />下载初步复盘</a>
+                    <a href={review.json.download_url}><DownloadSimple size={15} />下载游戏解析</a>
                   </div>
                 </article>
               );
@@ -680,8 +688,15 @@ function ReviewCenter({
                   <span className="queue-actions">
                     {review ? (
                       <>
-                        <a href={review.markdown.download_url}><DownloadSimple size={15} />Markdown</a>
-                        <a href={review.json.download_url}><FileText size={15} />JSON</a>
+                        <a
+                          href={review.markdown.preview_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <FileMagnifyingGlass size={15} />预览复盘
+                        </a>
+                        <a href={review.markdown.download_url}><DownloadSimple size={15} />下载初步复盘</a>
+                        <a href={review.json.download_url}><DownloadSimple size={15} />下载游戏解析</a>
                       </>
                     ) : owner ? (
                       <button onClick={() => onQueue(match.id)} disabled={busy}>

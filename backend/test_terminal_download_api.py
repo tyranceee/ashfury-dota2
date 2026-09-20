@@ -403,6 +403,66 @@ class TerminalDownloadApiTests(unittest.TestCase):
             401,
         )
 
+    def _write_review(self, text: str):
+        output_dir = self.server.DEEPSEEK_WORKER.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{self.match_id}.md"
+        path.write_text(text, encoding="utf-8")
+        self.addCleanup(path.unlink, True)
+        return path
+
+    def _write_review_json(self):
+        path = self.server.DEEPSEEK_WORKER.output_paths(self.match_id)["json"]
+        self.server.save_json(
+            path,
+            {"match_id": self.match_id, "content_markdown": "# 结论\n",
+             "generated_at": 1789909716, "model": "deepseek-flash",
+             "prompt": {"revision": 1}},
+        )
+        self.addCleanup(path.unlink, True)
+        return path
+
+    def test_preview_renders_readable_html_for_the_owner(self):
+        self.owner_login()
+        self._write_review("# 一句话结论\n\n本场靠肉山窗口拿下比赛 [数据]。\n")
+        response = self.client.get(f"/v1/preliminary-reviews/{self.match_id}/preview")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["content-type"].startswith("text/html"))
+        self.assertIn(f"比赛 {self.match_id} 初步解析", response.text)
+        self.assertIn("本场靠肉山窗口拿下比赛", response.text)
+        # Rendered inline rather than as a download, and locked down hard.
+        self.assertNotIn("attachment", response.headers.get("content-disposition", ""))
+        self.assertIn("default-src 'none'", response.headers["content-security-policy"])
+        self.assertIn("noindex", response.headers["x-robots-tag"])
+
+    def test_preview_escapes_review_text_so_it_cannot_inject_markup(self):
+        self.owner_login()
+        self._write_review(
+            "# 结论\n\n<script>alert('x')</script>\n"
+            "<img src=x onerror=alert(2)>\n"
+        )
+        response = self.client.get(f"/v1/preliminary-reviews/{self.match_id}/preview")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("<script>", response.text)
+        self.assertNotIn("<img src=x", response.text)
+        self.assertIn("&lt;script&gt;", response.text)
+
+    def test_preview_requires_a_credential(self):
+        self.client.cookies.clear()
+        self.assertEqual(
+            self.client.get(f"/v1/preliminary-reviews/{self.match_id}/preview").status_code,
+            401,
+        )
+
+    def test_index_exposes_the_preview_url(self):
+        self.owner_login()
+        self._write_review("# 结论\n")
+        self._write_review_json()
+        items = self.client.get("/v1/preliminary-reviews").json()["items"]
+        entry = next(item for item in items if item["match_id"] == self.match_id)
+        self.assertTrue(entry["markdown"]["preview_url"].endswith("/preview"))
+        self.assertTrue(entry["markdown"]["download_url"].endswith("/markdown"))
+
     def test_preliminary_index_is_publicly_listable(self):
         response = self.client.get("/v1/preliminary-reviews")
         self.assertEqual(response.status_code, 200)

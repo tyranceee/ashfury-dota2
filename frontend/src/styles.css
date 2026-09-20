@@ -275,6 +275,8 @@ main { padding: 16px 22px 0; }
 .result-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
 .result-actions a { display: flex; align-items: center; gap: 5px; border: 1px solid #5d5341; background: #12191a; color: #d4b47e; padding: 7px 10px; text-decoration: none; font-size: 9px; }
 .result-actions a:hover { border-color: #8f714a; color: #e8cd9d; }
+.result-actions a.preview-link { border-color: #7a6a48; color: #eddcb6; }
+.result-actions a.preview-link:hover { border-color: #a98b52; background: #1a1d19; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(2, 5, 6, .88); }
 .player-dialog, .owner-dialog { position: relative; width: min(670px, 100%); padding: 22px; border: 1px solid #765f40; background: #101617 url("/assets/textures/black-gold-archive.png") center / cover; color: #ded0b9; box-shadow: 0 25px 80px #000; }

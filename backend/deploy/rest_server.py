@@ -1317,6 +1317,7 @@ def preliminary_descriptor(match_id: int) -> dict | None:
             "filename": f"preliminary_review_{int(match_id)}.md",
             "size_bytes": markdown_path.stat().st_size if markdown_path.is_file() else None,
             "download_url": f"/dota2/api/v1/preliminary-reviews/{int(match_id)}/markdown",
+            "preview_url": f"/dota2/api/v1/preliminary-reviews/{int(match_id)}/preview",
         },
     }
 
@@ -1483,6 +1484,84 @@ def download_preliminary_review_markdown(match_id: int, request: Request):
         path,
         media_type="text/markdown; charset=utf-8",
         headers=download_headers(f"preliminary_review_{int(match_id)}.md"),
+    )
+
+
+def build_markdown_preview_page(match_id: int, markdown_text: str) -> str:
+    """Render a review artifact as a readable standalone HTML page.
+
+    The review text is inserted as escaped preformatted text only. Nothing is
+    interpreted as Markdown or HTML, so generated content (which may quote
+    untrusted web search results) cannot inject markup or scripts.
+    """
+    heading = html.escape(f"比赛 {int(match_id)} 初步解析")
+    body = html.escape(markdown_text)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{heading}</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{
+    margin: 0 auto; max-width: 900px; padding: 32px 20px 64px;
+    background: #0b1112; color: #ded0b9;
+    font: 14px/1.85 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }}
+  header {{
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+    justify-content: space-between; margin-bottom: 18px;
+    padding-bottom: 14px; border-bottom: 1px solid #3d3b34;
+  }}
+  h1 {{ margin: 0; font-size: 18px; color: #e8d3af; }}
+  header small {{ color: #8e8b82; font-size: 11px; }}
+  header a {{ color: #d4b47e; text-decoration: none; font-size: 11px; }}
+  pre {{
+    margin: 0; white-space: pre-wrap; word-break: break-word;
+    font: 13px/1.9 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #ded0b9;
+  }}
+</style>
+</head>
+<body>
+<header>
+  <h1>{heading}</h1>
+  <small>机器生成的初步解析 · 只读预览 · 原始 Markdown 请用「下载初步复盘」</small>
+</header>
+<pre>{body}</pre>
+</body>
+</html>
+"""
+
+
+@app.get("/v1/preliminary-reviews/{match_id}/preview")
+def preview_preliminary_review_markdown(match_id: int, request: Request):
+    """Serve the Markdown for in-browser viewing instead of downloading it.
+
+    Markdown is not reliably rendered inline, so the file is wrapped in a small
+    HTML shell with preformatted text. No Markdown library and no raw HTML
+    passthrough, so review content can never inject markup into the page.
+    """
+    resolve_read_access(request, SCOPE_REVIEW_READ)
+    path = DEEPSEEK_WORKER.output_paths(match_id)["markdown"]
+    if not path.is_file():
+        raise HTTPException(404, "初步解析尚未生成")
+    text = path.read_text("utf-8")
+    document = build_markdown_preview_page(match_id, text)
+    return HTMLResponse(
+        document,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex, nofollow",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "
+                "form-action 'none'; frame-ancestors 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+        },
     )
 
 
