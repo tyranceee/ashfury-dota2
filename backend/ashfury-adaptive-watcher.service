@@ -1,0 +1,17 @@
+[Unit]
+Description=Ashfury adaptive Dota monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/opt/dota2-mcp
+EnvironmentFile=/etc/ashfury/dota-monitor.env
+ExecStart=/opt/dota2-mcp/.venv/bin/python /opt/dota2-mcp/adaptive_watcher.py
+Restart=always
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

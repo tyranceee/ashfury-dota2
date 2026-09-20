@@ -1,0 +1,9 @@
+{
+  "policy_version": "ashfury.deep-review.v1",
+  "chatgpt_project_id": "g-p-6aa78324e1f88191854e83883e96778e",
+  "chatgpt_project_name": "Dota",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "max",
+  "required_skill": "dota2-deep-match-review",
+  "slack_channel_id": "C_REPLACE_WITH_DEDICATED_CHANNEL_ID"
+}

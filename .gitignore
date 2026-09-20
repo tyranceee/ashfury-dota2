@@ -1,0 +1,35 @@
+.DS_Store
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+artifact-upload-token
+review-signing-secret
+slack-bot-token
+refresh-token
+
+# Runtime databases, caches, match data, and uploaded artifacts
+*.sqlite
+*.sqlite3
+adaptive_monitor_state.json
+matches_index.json
+data/
+artifacts/
+history_profiles_v01/
+history_match_roles/
+test_results/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.backup-*
+

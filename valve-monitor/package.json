@@ -1,0 +1,24 @@
+{
+  "name": "ashfury-valve-dota-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Valve-only Dota 2 presence and completed-match monitor",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dota2-user": "2.1.1",
+    "steam-user": "5.3.0"
+  },
+  "overrides": {
+    "steam-user": {
+      "adm-zip": "0.6.1",
+      "steam-appticket": "2.0.1"
+    }
+  }
+}

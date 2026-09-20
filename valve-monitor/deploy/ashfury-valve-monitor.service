@@ -1,0 +1,23 @@
+[Unit]
+Description=ashfury Valve-only Dota match monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/opt/dota2-mcp/valve-monitor
+EnvironmentFile=/etc/ashfury/valve-monitor.env
+ExecStart=/usr/bin/node /opt/dota2-mcp/valve-monitor/src/index.js
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dota2-mcp/valve-monitor/state /opt/dota2-mcp/valve-monitor/cache
+
+[Install]
+WantedBy=multi-user.target
