@@ -881,7 +881,8 @@ def run_search_loop(
     if not ready:
         raise WebSearchNotConfigured(reason)
 
-    iteration_cap = int(max_iterations or config.get("max_calls") or 5)
+    call_cap = int(max_iterations or config.get("max_calls") or 5)
+    attempted_search_calls = 0
     conversation = list(messages)
     citations: list[dict] = []
     searches: list[dict] = []
@@ -892,8 +893,8 @@ def run_search_loop(
     }
     total_cost_cny = 0.0
 
-    for iteration in range(iteration_cap + 1):
-        allow_tools = iteration < iteration_cap
+    for iteration in range(call_cap + 1):
+        allow_tools = attempted_search_calls < call_cap
         result = client.chat(
             conversation,
             max_tokens=max_tokens,
@@ -940,6 +941,19 @@ def run_search_loop(
             except json.JSONDecodeError:
                 arguments = {"query": str(raw_arguments)[:200]}
             query = str(arguments.get("query") or "").strip()
+            if attempted_search_calls >= call_cap:
+                payload = {
+                    "query": query,
+                    "error": f"search call limit reached ({call_cap})",
+                    "results": [],
+                }
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(payload, ensure_ascii=False),
+                })
+                continue
+            attempted_search_calls += 1
             try:
                 outcome = web_search(query, config)
                 total_cost_cny += float((outcome.cost or {}).get("cost_cny") or 0)

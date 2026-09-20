@@ -124,7 +124,19 @@ function mergeProfiles(workspace, profileData) {
     scored.filter((profile) => profile.account_id)
       .map((profile) => [profile.account_id, profile]),
   );
-  const merged = identities.map((identity) => scoredByAccount.get(identity.account_id) || identity);
+  const merged = identities.map((identity) => {
+    const scoredProfile = scoredByAccount.get(identity.account_id);
+    if (!scoredProfile) return identity;
+    return {
+      ...identity,
+      ...scoredProfile,
+      hero_id: scoredProfile.hero_id || identity.hero_id,
+      hero_name: scoredProfile.hero_name || identity.hero_name,
+      hero_image: scoredProfile.hero_image || identity.hero_image,
+      relation: scoredProfile.relation || identity.relation,
+      is_self: scoredProfile.is_self ?? identity.is_self,
+    };
+  });
   const known = new Set(merged.map((profile) => profile.account_id).filter(Boolean));
   return [...merged, ...scored.filter((profile) => !known.has(profile.account_id))];
 }
@@ -471,7 +483,8 @@ function ReviewCenter({
         {reviews.length ? (
           <div className="review-file-grid">
             {reviews.map((review) => {
-              const match = matchById.get(String(review.match_id));
+              const embeddedMatch = review.match ? normalizeMatch(review.match) : null;
+              const match = matchById.get(String(review.match_id)) || embeddedMatch;
               const result = match?.result;
               return (
                 <article key={review.match_id}>

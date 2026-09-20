@@ -462,6 +462,9 @@ class TerminalDownloadApiTests(unittest.TestCase):
         entry = next(item for item in items if item["match_id"] == self.match_id)
         self.assertTrue(entry["markdown"]["preview_url"].endswith("/preview"))
         self.assertTrue(entry["markdown"]["download_url"].endswith("/markdown"))
+        self.assertEqual(entry["match"]["match_id"], self.match_id)
+        self.assertEqual(entry["match"]["kda"], "9/1/10")
+        self.assertEqual(entry["match"]["duration"], "45:35")
 
     def test_preliminary_index_is_publicly_listable(self):
         response = self.client.get("/v1/preliminary-reviews")

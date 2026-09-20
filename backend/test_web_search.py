@@ -565,6 +565,31 @@ class SearchLoopTest(SearchTestBase):
         self.assertIsNone(client.requests[-1]["tools"])
         self.assertEqual(len(result["searches"]), 2)
 
+    def test_loop_caps_total_calls_when_one_round_requests_many_searches(self):
+        FakeHttpx.payloads["post"] = ANTHROPIC_REPLY
+        calls = self.tool_call("q1") + [{
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "web_search",
+                         "arguments": json.dumps({"query": "q2", "reason": "补充"})},
+        }]
+        client = self.StubClient([
+            {"content": "", "reasoning_content": "", "tool_calls": calls,
+             "finish_reason": "tool_calls", "usage": self.usage(), "model": "deepseek-flash",
+             "response_id": "r1"},
+            {"content": "done", "reasoning_content": "", "tool_calls": [],
+             "finish_reason": "stop", "usage": self.usage(), "model": "deepseek-flash",
+             "response_id": "r2"},
+        ])
+        result = run_search_loop(client, [{"role": "user", "content": "复盘"}],
+                                 max_tokens=1000, temperature=0.2,
+                                 search_config={**self.config, "max_calls": 1})
+        self.assertEqual(len(FakeHttpx.calls), 1)
+        self.assertEqual(len(result["searches"]), 1)
+        tool_messages = [m for m in client.requests[1]["messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 2)
+        self.assertIn("search call limit reached", tool_messages[1]["content"])
+
     def test_search_failure_is_reported_to_the_model_without_aborting(self):
         FakeHttpx.status = 500
         client = self.StubClient([

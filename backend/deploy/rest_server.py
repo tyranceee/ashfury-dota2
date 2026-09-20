@@ -51,6 +51,7 @@ from deepseek_review import (
     DeepSeekConfigError,
     PromptStore,
     ReviewJobStore,
+    estimate_cost,
     read_api_key,
     schedule_snapshot,
 )
@@ -1300,14 +1301,32 @@ def preliminary_descriptor(match_id: int) -> dict | None:
     if not json_path.is_file() and not markdown_path.is_file():
         return None
     payload = DEEPSEEK_WORKER.read_output(match_id) or {}
+    cost = payload.get("cost") or {}
+    if cost.get("currency") != "CNY" or cost.get("cost_cny") is None:
+        cost = estimate_cost(
+            payload.get("usage") or {},
+            off_peak=payload.get("billing_window") == "off_peak",
+        )
+        cost["model_cost_cny"] = cost["cost_cny"]
+        cost["search_cost_cny"] = round(
+            float((payload.get("web_search") or {}).get("search_cost_cny") or 0),
+            6,
+        )
+        cost["cost_cny"] = round(
+            float(cost["model_cost_cny"]) + float(cost["search_cost_cny"]),
+            6,
+        )
+        cost["estimated_cny"] = cost["cost_cny"]
+    match_item = index().get(str(int(match_id)))
     return {
         "match_id": int(match_id),
+        "match": summary(match_item) if match_item else None,
         "generated_at": payload.get("generated_at"),
         "model": payload.get("model"),
         "billing_window": payload.get("billing_window"),
         "prompt_revision": (payload.get("prompt") or {}).get("revision"),
         "usage": payload.get("usage"),
-        "cost": payload.get("cost"),
+        "cost": cost,
         "json": {
             "filename": f"preliminary_review_{int(match_id)}.json",
             "size_bytes": json_path.stat().st_size if json_path.is_file() else None,
