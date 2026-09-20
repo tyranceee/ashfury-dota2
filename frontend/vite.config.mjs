@@ -14,8 +14,11 @@ export default defineConfig({
     allowedHosts: ["terminal.local"],
     proxy: {
       "/dota2/api": {
-        target: "https://ashfury.cn",
+        // Nginx strips the /dota2/api prefix in production, so the dev proxy
+        // must strip it too. Override the origin with DOTA2_API_PROXY.
+        target: process.env.DOTA2_API_PROXY || "https://ashfury.cn",
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/dota2\/api/, ""),
       },
     },
     warmup: {

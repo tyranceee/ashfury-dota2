@@ -38,6 +38,23 @@ from review_trigger import (
     TARGET_SKILL as REVIEW_TARGET_SKILL,
     build_deep_review_instruction,
 )
+from terminal_access import (
+    SCOPE_ARTIFACT_READ,
+    SCOPE_PARSED_READ,
+    SCOPE_REVIEW_ENQUEUE,
+    SCOPE_REVIEW_READ,
+    KNOWN_SCOPES,
+    TerminalAccessError,
+    TerminalAccessStore,
+)
+from deepseek_review import (
+    DeepSeekConfigError,
+    PromptStore,
+    ReviewJobStore,
+    read_api_key,
+    schedule_snapshot,
+)
+from deepseek_worker import DeepSeekReviewWorker
 
 app = FastAPI(title="Ashfury Dota2 API", version="5.0")
 
@@ -52,6 +69,27 @@ HISTORY_PROFILE_DIR = BASE / "history_profiles_v01"
 HISTORY_ROLE_DIR = BASE / "history_match_roles"
 ARTIFACTS_DIR = BASE / "artifacts"
 UPLOAD_TOKEN_FILE = BASE / "artifact-upload-token"
+TERMINAL_TOKENS_FILE = Path(
+    os.environ.get("DOTA2_TERMINAL_TOKENS", BASE / "terminal-download-tokens.json")
+)
+TERMINAL_AUDIT_FILE = Path(
+    os.environ.get("DOTA2_TERMINAL_AUDIT", BASE / "terminal-access-audit.ndjson")
+)
+DEEPSEEK_PROMPT_FILE = Path(
+    os.environ.get("DOTA2_DEEPSEEK_PROMPT", BASE / "deepseek-review-prompt.json")
+)
+DEEPSEEK_JOBS_FILE = Path(
+    os.environ.get("DOTA2_DEEPSEEK_JOBS", BASE / "deepseek-review-jobs.json")
+)
+DEEPSEEK_OUTPUT_DIR = Path(
+    os.environ.get("DOTA2_DEEPSEEK_OUTPUTS", BASE / "preliminary_reviews")
+)
+DEEPSEEK_API_KEY_FILE = Path(
+    os.environ.get("DOTA2_DEEPSEEK_API_KEY_FILE", BASE / "deepseek-api-key")
+)
+HOLIDAY_CALENDAR_FILE = Path(
+    os.environ.get("DOTA2_HOLIDAY_CALENDAR", BASE / "cn-public-holidays.json")
+)
 REVIEWS_DIR = Path(
     os.environ.get("DOTA2_REVIEWS_DIR", "/var/www/ashfury-dota-root/dota/reviews")
 )
@@ -63,6 +101,13 @@ OWNER_COOKIE_NAME = "ashfury_owner_session"
 OWNER_COOKIE_MAX_AGE = 180 * 24 * 60 * 60
 PUBLIC_ORIGIN = "https://ashfury.cn"
 PUBLIC_API_BASE = f"{PUBLIC_ORIGIN}/dota2/api"
+# Extra origins allowed to send authenticated writes, for local UI development.
+# Production only needs the public origin; this stays empty there.
+ALLOWED_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("DOTA2_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+} | {PUBLIC_ORIGIN}
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_MATCH_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024
@@ -94,6 +139,11 @@ HERO_MAP = None
 HERO_IMAGE_MAP = None
 LOGGER = logging.getLogger("ashfury.owner_review")
 OWNER_REVIEW = OwnerReviewStore(OWNER_DB_FILE, REVIEW_SIGNING_SECRET_FILE)
+TERMINAL_ACCESS = TerminalAccessStore(TERMINAL_TOKENS_FILE, TERMINAL_AUDIT_FILE)
+DEEPSEEK_PROMPTS = PromptStore(DEEPSEEK_PROMPT_FILE)
+DEEPSEEK_JOBS = ReviewJobStore(DEEPSEEK_JOBS_FILE)
+# DEEPSEEK_WORKER is constructed further down, once index()/cached()/summary()
+# and the sanitizer exist.
 
 
 class OwnerCodeBody(BaseModel):
@@ -102,6 +152,40 @@ class OwnerCodeBody(BaseModel):
 
 
 class ReviewJobBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    match_id: int = Field(gt=0)
+
+
+class TerminalTokenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(default="terminal", max_length=80)
+    scopes: list[str] | None = None
+    ttl_seconds: int | None = Field(default=None, ge=0, le=3650 * 24 * 3600)
+
+
+class DeepSeekSettingsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    auto_review_enabled: bool | None = None
+    batch_size: int | None = Field(default=None, ge=1, le=10)
+    model: str | None = Field(default=None, max_length=80)
+    max_output_tokens: int | None = Field(default=None, ge=512, le=384000)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    resume_only_off_peak: bool | None = None
+
+
+class DeepSeekPromptBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=200000)
+    note: str = Field(default="", max_length=500)
+    title: str = Field(default="", max_length=120)
+
+
+class DeepSeekPromptActivateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: int = Field(gt=0)
+
+
+class PreliminaryReviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     match_id: int = Field(gt=0)
 
@@ -687,7 +771,7 @@ def authorize_upload(authorization):
 
 def reject_cross_origin(request: Request):
     origin = request.headers.get("origin")
-    if origin and origin != PUBLIC_ORIGIN:
+    if origin and origin.rstrip("/") not in ALLOWED_ORIGINS:
         raise HTTPException(403, "Cross-origin request is not allowed")
 
 
@@ -700,6 +784,57 @@ def require_owner(request: Request):
     if not OWNER_REVIEW.validate_session(token):
         raise HTTPException(403, "Owner authorization required")
     return token
+
+
+def resolve_read_access(request: Request, required_scope: str) -> dict:
+    """Accept either a scoped terminal Bearer token or the Owner browser cookie.
+
+    A Bearer token is honoured for any caller because it carries its own scope.
+    The Owner cookie is only honoured for same-origin requests, so a third-party
+    page cannot use the browser session as an open download proxy.
+    """
+    authorization = request.headers.get("authorization")
+    if authorization:
+        try:
+            token = TERMINAL_ACCESS.verify(
+                authorization,
+                required_scope,
+                client_label=request.client.host if request.client else "unknown",
+            )
+        except TerminalAccessError as error:
+            raise HTTPException(401, str(error))
+        return {
+            "channel": "terminal_token",
+            "token_id": token.token_id,
+            "label": token.label,
+            "scopes": token.scopes,
+        }
+
+    reject_cross_origin(request)
+    if not OWNER_REVIEW.validate_session(owner_session_token(request)):
+        raise HTTPException(
+            401,
+            "Authorized terminal token or Owner session required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {"channel": "owner_session", "token_id": None, "label": "owner", "scopes": ["admin"]}
+
+
+def download_headers(filename: str, extra: dict | None = None) -> dict:
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "private, no-store",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def require_terminal_owner(request: Request):
+    """Owner-only management of terminal tokens; Bearer tokens cannot mint tokens."""
+    return require_owner(request)
 
 
 def pairing_client_key(request: Request):
@@ -900,6 +1035,19 @@ def summary(item):
     }
 
 
+DEEPSEEK_WORKER = DeepSeekReviewWorker(
+    job_store=DEEPSEEK_JOBS,
+    prompt_store=DEEPSEEK_PROMPTS,
+    output_dir=DEEPSEEK_OUTPUT_DIR,
+    api_key_path=DEEPSEEK_API_KEY_FILE,
+    index_loader=index,
+    match_loader=cached,
+    match_summary=summary,
+    sanitizer=sanitize_match_for_model,
+    holiday_calendar_path=HOLIDAY_CALENDAR_FILE,
+)
+
+
 def page(title, body):
     return HTMLResponse(f"""
 <!doctype html>
@@ -920,6 +1068,12 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f6f8fa;padding:16px}
 <body>{body}</body>
 </html>
 """)
+
+
+@app.on_event("startup")
+def start_background_review_worker():
+    """Start the off-peak DeepSeek scheduler once the process is serving."""
+    DEEPSEEK_WORKER.start()
 
 
 @app.get("/status")
@@ -1129,8 +1283,242 @@ def review_job_payload(
     )
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek preliminary review: prompt, schedule, jobs, downloads
+# ---------------------------------------------------------------------------
+
+
+def preliminary_descriptor(match_id: int) -> dict | None:
+    paths = DEEPSEEK_WORKER.output_paths(match_id)
+    json_path = paths["json"]
+    markdown_path = paths["markdown"]
+    if not json_path.is_file() and not markdown_path.is_file():
+        return None
+    payload = DEEPSEEK_WORKER.read_output(match_id) or {}
+    return {
+        "match_id": int(match_id),
+        "generated_at": payload.get("generated_at"),
+        "model": payload.get("model"),
+        "billing_window": payload.get("billing_window"),
+        "prompt_revision": (payload.get("prompt") or {}).get("revision"),
+        "usage": payload.get("usage"),
+        "cost": payload.get("cost"),
+        "json": {
+            "filename": f"preliminary_review_{int(match_id)}.json",
+            "size_bytes": json_path.stat().st_size if json_path.is_file() else None,
+            "download_url": f"/dota2/api/v1/preliminary-reviews/{int(match_id)}/json",
+        },
+        "markdown": {
+            "filename": f"preliminary_review_{int(match_id)}.md",
+            "size_bytes": markdown_path.stat().st_size if markdown_path.is_file() else None,
+            "download_url": f"/dota2/api/v1/preliminary-reviews/{int(match_id)}/markdown",
+        },
+    }
+
+
+@app.get("/v1/deepseek/status")
+def deepseek_status():
+    status = DEEPSEEK_WORKER.status()
+    prompt = DEEPSEEK_PROMPTS.get_revision()
+    status["prompt"]["preview"] = (prompt or {}).get("content", "")[:400]
+    status["api_key_help"] = (
+        f"在服务器创建 {DEEPSEEK_API_KEY_FILE}，写入 API Key 后执行 chmod 600。"
+    )
+    status["jobs"] = DEEPSEEK_JOBS.list_jobs(limit=20)
+    return JSONResponse(status, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/v1/deepseek/schedule")
+def deepseek_schedule():
+    holidays = DEEPSEEK_WORKER.holidays()
+    snapshot = schedule_snapshot(int(time.time()), holidays)
+    snapshot["holidays_loaded"] = len(holidays)
+    snapshot["auto_review_enabled"] = bool(DEEPSEEK_JOBS.settings().get("auto_review_enabled"))
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
+
+
+@app.put("/v1/deepseek/settings")
+def update_deepseek_settings(body: DeepSeekSettingsBody, request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    changes = body.model_dump(exclude_none=True)
+    if "auto_review_enabled" in changes:
+        if changes["auto_review_enabled"] and DEEPSEEK_PROMPTS.get_revision() is None:
+            raise HTTPException(
+                409,
+                "请先在网页粘贴初步解析 Prompt 并保存，再开启自动复盘",
+            )
+    updated = DEEPSEEK_JOBS.update_settings(changes)
+    return JSONResponse(
+        {"settings": updated, "status": DEEPSEEK_WORKER.status()},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/v1/deepseek/prompts")
+def create_deepseek_prompt(body: DeepSeekPromptBody, request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    try:
+        revision = DEEPSEEK_PROMPTS.create_revision(
+            body.content,
+            note=body.note,
+            title=body.title,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    return JSONResponse(
+        revision,
+        status_code=200 if revision.get("reused") else 201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/deepseek/prompts")
+def list_deepseek_prompts(include_content: bool = Query(False)):
+    return JSONResponse(
+        DEEPSEEK_PROMPTS.list_revisions(include_content=include_content),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put("/v1/deepseek/prompts/active")
+def activate_deepseek_prompt(body: DeepSeekPromptActivateBody, request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    activated = DEEPSEEK_PROMPTS.activate(body.revision)
+    if activated is None:
+        raise HTTPException(404, "Prompt revision not found")
+    return JSONResponse(activated, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/v1/deepseek/preliminary-reviews")
+def enqueue_preliminary_review(body: PreliminaryReviewBody, request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    item = owned(body.match_id)
+    if not item.get("parsed") and not cache_path(body.match_id).is_file():
+        raise HTTPException(409, "该比赛还没有解析数据，无法排队初步解析")
+    prompt = DEEPSEEK_PROMPTS.get_revision()
+    if prompt is None:
+        raise HTTPException(409, "请先在网页粘贴并保存初步解析 Prompt")
+    settings = DEEPSEEK_JOBS.settings()
+    batch_id = f"m{int(body.match_id)}"
+    job, created = DEEPSEEK_JOBS.upsert_job(
+        body.match_id,
+        batch_id=batch_id,
+        prompt_revision=int(prompt["revision"]),
+        model=settings.get("model"),
+        priority=10,
+    )
+    return JSONResponse(
+        {
+            "job": job,
+            "created": created,
+            "schedule": DEEPSEEK_WORKER.schedule(),
+            "note": "初步解析只会在 DeepSeek 错峰时段执行，以享受 5 折费率。",
+        },
+        status_code=201 if created else 200,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/preliminary-reviews")
+def list_preliminary_reviews():
+    items = []
+    for path in sorted(DEEPSEEK_OUTPUT_DIR.glob("*.json")):
+        try:
+            match_id = int(path.stem)
+        except ValueError:
+            continue
+        descriptor = preliminary_descriptor(match_id)
+        if descriptor:
+            items.append(descriptor)
+    items.sort(key=lambda item: item.get("generated_at") or 0, reverse=True)
+    return JSONResponse(
+        {
+            "schema_version": "ashfury.preliminary-review-index.v1",
+            "count": len(items),
+            "items": items,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/preliminary-reviews/{match_id}")
+def get_preliminary_review(match_id: int, request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    payload = DEEPSEEK_WORKER.read_output(match_id)
+    if payload is None:
+        raise HTTPException(404, "初步解析尚未生成")
+    return JSONResponse(payload, headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/v1/preliminary-reviews/{match_id}/json")
+def download_preliminary_review_json(match_id: int, request: Request):
+    resolve_read_access(request, SCOPE_REVIEW_READ)
+    path = DEEPSEEK_WORKER.output_paths(match_id)["json"]
+    if not path.is_file():
+        raise HTTPException(404, "初步解析尚未生成")
+    return FileResponse(
+        path,
+        media_type="application/json",
+        headers=download_headers(f"preliminary_review_{int(match_id)}.json"),
+    )
+
+
+@app.get("/v1/preliminary-reviews/{match_id}/markdown")
+def download_preliminary_review_markdown(match_id: int, request: Request):
+    resolve_read_access(request, SCOPE_REVIEW_READ)
+    path = DEEPSEEK_WORKER.output_paths(match_id)["markdown"]
+    if not path.is_file():
+        raise HTTPException(404, "初步解析尚未生成")
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        headers=download_headers(f"preliminary_review_{int(match_id)}.md"),
+    )
+
+
+@app.post("/v1/deepseek/run-now")
+def run_deepseek_cycle(request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    return JSONResponse(
+        DEEPSEEK_WORKER.tick(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/deepseek/health")
+def deepseek_health(request: Request):
+    reject_cross_origin(request)
+    require_owner(request)
+    try:
+        from deepseek_review import DeepSeekClient
+
+        client = DeepSeekClient(read_api_key(DEEPSEEK_API_KEY_FILE))
+        result = client.probe()
+    except DeepSeekConfigError as error:
+        raise HTTPException(503, str(error))
+    except Exception as error:
+        raise HTTPException(502, f"DeepSeek 调用失败：{error}")
+    return JSONResponse(
+        {
+            "ok": result["ok"],
+            "model": result["model"],
+            "finish_reason": result["finish_reason"],
+            "usage": result["usage"],
+            "schedule": DEEPSEEK_WORKER.schedule(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/historical-profile/test/last10")
 def historical_profile_test_last10():
+
     report = load_json(HISTORY_TEST_FILE, None)
 
     if report is None:
@@ -1187,6 +1575,213 @@ def api_match(match_id: int):
         save_json(cache_path(match_id), data)
 
     return data
+
+
+def parsed_json_descriptor(match_id, item):
+    path = cache_path(match_id)
+    digest = None
+    size = None
+    if path.is_file():
+        stat = path.stat()
+        size = stat.st_size
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        "match_id": int(match_id),
+        "filename": f"match_{int(match_id)}.json",
+        "size_bytes": size,
+        "sha256": digest,
+        "content_type": "application/json",
+        "parse_status": unified_parse_state(item),
+        "parse_source": item.get("parse_source"),
+        "download_url": f"/dota2/api/v1/terminal/parsed/{int(match_id)}",
+        "raw_url": f"/dota2/api/match/{int(match_id)}",
+        "cached_locally": path.is_file(),
+    }
+
+
+def ensure_parsed_cached(match_id):
+    """Return the parsed match JSON, fetching and caching it at most once."""
+    data = cached(match_id)
+    if isinstance(data, dict):
+        return data
+    data = get_match(match_id)
+    if not parsed(data):
+        raise HTTPException(409, "Match is not parsed yet; no parsed JSON to download")
+    save_json(cache_path(match_id), data)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Authorized terminal API: scoped download credentials
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/terminal/capabilities")
+def terminal_capabilities(request: Request):
+    access = resolve_read_access(request, SCOPE_PARSED_READ)
+    return JSONResponse(
+        {
+            "schema_version": "ashfury.terminal-access.v1",
+            "access": access,
+            "known_scopes": list(KNOWN_SCOPES),
+            "endpoints": [
+                {
+                    "method": "GET",
+                    "path": "/dota2/api/v1/terminal/index",
+                    "scope": SCOPE_PARSED_READ,
+                    "purpose": "列出已解析比赛及其下载元数据",
+                },
+                {
+                    "method": "GET",
+                    "path": "/dota2/api/v1/terminal/parsed/{match_id}",
+                    "scope": SCOPE_PARSED_READ,
+                    "purpose": "下载单场已解析 JSON（附件形式）",
+                },
+                {
+                    "method": "GET",
+                    "path": "/dota2/api/v1/terminal/preliminary-reviews",
+                    "scope": SCOPE_REVIEW_READ,
+                    "purpose": "列出已生成的初步解析文件",
+                },
+                {
+                    "method": "GET",
+                    "path": "/dota2/api/v1/terminal/preliminary-reviews/{match_id}",
+                    "scope": SCOPE_REVIEW_READ,
+                    "purpose": "下载初步解析文件（json/md）",
+                },
+                {
+                    "method": "POST",
+                    "path": "/dota2/api/v1/terminal/preliminary-reviews",
+                    "scope": SCOPE_REVIEW_ENQUEUE,
+                    "purpose": "为某场比赛排队初步解析（仅在错峰时段执行）",
+                },
+                {
+                    "method": "GET",
+                    "path": "/dota2/api/artifacts/{match_id}/{artifact_type}",
+                    "scope": SCOPE_ARTIFACT_READ,
+                    "purpose": "下载 DotaReplayDesk 上传的解析附件",
+                },
+            ],
+            "auth": {
+                "scheme": "Bearer",
+                "header": "Authorization: Bearer <token>",
+                "owner_cookie_channel": "same-origin browser only",
+                "cross_origin_cookie_use": "rejected",
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/v1/terminal/index")
+def terminal_index(request: Request, parsed_only: bool = Query(True)):
+    resolve_read_access(request, SCOPE_PARSED_READ)
+    items = sorted(
+        index().values(),
+        key=lambda x: x.get("start_time", 0),
+        reverse=True,
+    )
+    descriptors = []
+    for item in items:
+        if parsed_only and not item.get("parsed"):
+            continue
+        match_id = int(item.get("match_id") or 0)
+        if not match_id:
+            continue
+        descriptors.append(parsed_json_descriptor(match_id, item))
+    return JSONResponse(
+        {
+            "schema_version": "ashfury.terminal-index.v1",
+            "generated_at": int(time.time()),
+            "count": len(descriptors),
+            "parsed_only": bool(parsed_only),
+            "items": descriptors,
+        },
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
+@app.get("/v1/terminal/parsed/{match_id}")
+def terminal_download_parsed(match_id: int, request: Request):
+    access = resolve_read_access(request, SCOPE_PARSED_READ)
+    item = owned(match_id)
+    path = cache_path(match_id)
+    if not path.is_file():
+        ensure_parsed_cached(match_id)
+    if not path.is_file():
+        raise HTTPException(503, "Parsed JSON is not available on this server yet")
+    LOGGER.info(
+        "Parsed JSON download match=%s channel=%s token=%s",
+        match_id,
+        access["channel"],
+        access["token_id"],
+    )
+    return FileResponse(
+        path,
+        media_type="application/json",
+        headers=download_headers(
+            f"match_{int(match_id)}.json",
+            {"X-Ashfury-Access-Channel": access["channel"]},
+        ),
+    )
+
+
+@app.get("/v1/terminal/tokens")
+def list_terminal_tokens(request: Request):
+    require_terminal_owner(request)
+    return JSONResponse(
+        {
+            "known_scopes": list(KNOWN_SCOPES),
+            "tokens": TERMINAL_ACCESS.list_tokens(),
+            "audit_tail": TERMINAL_ACCESS.audit_tail(limit=25),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/v1/terminal/tokens")
+def create_terminal_token(body: TerminalTokenBody, request: Request):
+    require_terminal_owner(request)
+    try:
+        token = TERMINAL_ACCESS.create_token(
+            label=body.label,
+            scopes=body.scopes,
+            ttl_seconds=(
+                body.ttl_seconds
+                if body.ttl_seconds is not None
+                else 180 * 24 * 60 * 60
+            ),
+            source="owner_web",
+        )
+    except TerminalAccessError as error:
+        raise HTTPException(400, str(error))
+    return JSONResponse(
+        {
+            "token": token.public(),
+            "plaintext_token": token._plaintext,
+            "warning": "该明文只显示一次；服务器只保存 SHA-256 哈希。",
+        },
+        status_code=201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/v1/terminal/tokens/{token_id}")
+def revoke_terminal_token(token_id: str, request: Request):
+    require_terminal_owner(request)
+    if not TERMINAL_ACCESS.revoke_token(token_id):
+        raise HTTPException(404, "Terminal token not found")
+    return JSONResponse({"token_id": token_id, "revoked": True}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/v1/terminal/tokens/revoke-all")
+def revoke_all_terminal_tokens(request: Request):
+    require_terminal_owner(request)
+    revoked = TERMINAL_ACCESS.revoke_all()
+    return JSONResponse(
+        {"revoked_count": revoked},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/page/recent", response_class=HTMLResponse)
@@ -1381,8 +1976,25 @@ async def upload_artifact(
 
 
 @app.get("/artifacts/{match_id}/{artifact_type}")
-def serve_artifact(match_id: int, artifact_type: str):
+def serve_artifact(match_id: int, artifact_type: str, request: Request):
     owned(match_id)
+    # Browser visitors keep the existing public read path. A caller that presents
+    # a scoped terminal token is verified so downloads can be attributed.
+    if request.headers.get("authorization"):
+        try:
+            terminal = TERMINAL_ACCESS.verify(
+                request.headers.get("authorization"),
+                SCOPE_ARTIFACT_READ,
+                client_label=request.client.host if request.client else "unknown",
+            )
+            LOGGER.info(
+                "Artifact download match=%s type=%s token=%s",
+                match_id,
+                artifact_type,
+                terminal.token_id,
+            )
+        except TerminalAccessError as error:
+            raise HTTPException(401, str(error))
     destination = artifact_path(match_id, artifact_type)
     if not destination.is_file():
         raise HTTPException(404, "Artifact is not available")

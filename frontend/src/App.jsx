@@ -4,15 +4,20 @@ import {
   ArrowRight,
   ArrowSquareOut,
   BookOpenText,
+  Brain,
   Check,
   ClockCounterClockwise,
+  CloudCheck,
   Database,
   DownloadSimple,
   FileMagnifyingGlass,
   FileText,
   Flame,
   FolderOpen,
+  Globe,
+  Key,
   MagnifyingGlass,
+  PaperPlaneTilt,
   Pulse,
   ShieldCheck,
   Sword,
@@ -53,6 +58,7 @@ const nav = [
   ["archive", "比赛档案", Archive],
   ["profiles", "玩家画像", UserFocus],
   ["reviews", "复盘报告", BookOpenText],
+  ["preliminary", "初步解析", Brain],
   ["data", "数据中心", Database],
 ];
 const reviewIds = new Set(reviewLibrary.map(([id]) => id));
@@ -400,6 +406,292 @@ function DataView({ workspace, inventory, monitor }) {
   return <section className="data-center"><div className="section-intro"><span>DATA PROVENANCE</span><h1>数据中心</h1><p>统一展示比赛基础数据、唯一解析结果和 DotaReplayDesk 附件。</p></div><div className="data-grid"><article><h2>当前比赛状态</h2><dl><div><dt>比赛 ID</dt><dd>{workspace?.match?.match_id || "—"}</dd></div><div><dt>统一解析状态</dt><dd>{status}</dd></div><div><dt>结果来源</dt><dd>{source}</dd></div><div><dt>历史画像</dt><dd>{workspace?.historical_profile?.status === "ready" ? "已缓存" : "按需计算"}</dd></div><div><dt>在线检测策略</dt><dd>{monitor?.dota_online ? "每10秒" : "每10分钟"}</dd></div></dl>{parse.result_url && <a className="data-link" href={parse.result_url} target="_blank" rel="noreferrer"><FileText size={17} />打开统一解析 JSON<ArrowSquareOut size={14} /></a>}</article><article><h2>本地解析附件</h2>{files.length ? <div className="artifact-list">{files.map((file) => <a key={file.type} href={file.url} target="_blank" rel="noreferrer"><FileText size={18} /><span><strong>{file.label || artifactLabels[file.type] || file.type}</strong><small>{file.filename || file.type}</small></span><DownloadSimple size={17} /></a>)}</div> : <div className="artifact-empty"><FileMagnifyingGlass size={25} /><span><strong>暂无本地附件</strong><small>DotaReplayDesk 上传后才会出现，不生成无效链接。</small></span></div>}<div className="privacy-note"><ShieldCheck size={18} />附件可能包含玩家标识或游戏内聊天，链接公开可读。</div></article></div></section>;
 }
 
+const formatBeijing = (timestamp) => {
+  if (!timestamp) return "—";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    hour12: false, timeZone: "Asia/Shanghai",
+  }).format(new Date(timestamp * 1000));
+};
+
+const formatCountdown = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "现在";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours >= 1) return `${hours} 小时 ${minutes} 分`;
+  if (minutes >= 1) return `${minutes} 分`;
+  return `${seconds} 秒`;
+};
+
+function reviewStateLabel(job, review) {
+  if (review) return "已生成初步解析";
+  if (!job) return "未排队";
+  if (job.status === "done") return "已生成初步解析";
+  if (job.status === "running") return "正在调用 DeepSeek";
+  if (job.status === "failed") return "执行失败";
+  if (job.status === "paused_peak") return "已暂停，等待下一个错峰窗口";
+  return "已排队，等待错峰时段";
+}
+
+function ReviewCenter({
+  owner, matches, currentMatchId, deepseek, prompts, reviews, jobs, nowSeconds,
+  busy, onToggleAuto, onSavePrompt, onActivatePrompt, onLoadPromptFile, onQueue,
+  onRefresh, onRunCycle, promptDraft, setPromptDraft, schedule,
+}) {
+  const schedule0 = schedule || deepseek?.schedule || {};
+  const status = deepseek || {};
+  const webSearch = status.web_search || {};
+  const promptState = status.prompt || {};
+  const jobByMatch = new Map((jobs || []).map((job) => [Number(job.match_id), job]));
+  const reviewByMatch = new Map((reviews || []).map((review) => [Number(review.match_id), review]));
+  const parsedMatches = matches.filter((match) => match.status === "已解析");
+  const autoScope = parsedMatches.slice(0, Number(status.batch_size) || 3);
+
+  const nextOffPeakIn = schedule0.off_peak_now
+    ? 0
+    : Math.max(0, Math.round((Date.parse(schedule0.next_change_utc) / 1000) - nowSeconds));
+  const windowClosesIn = schedule0.off_peak_now
+    ? Math.max(0, Math.round((Date.parse(schedule0.next_change_utc) / 1000) - nowSeconds))
+    : null;
+
+  return (
+    <section className="review-center">
+      <div className="section-intro">
+        <span>DEEPSEEK PRELIMINARY REVIEW</span>
+        <h1>初步解析</h1>
+        <p>服务器在 DeepSeek 错峰时段自动跑初步解析，只处理最近 {status.batch_size || 3} 场已解析比赛。错峰费率是峰时的 5 折。</p>
+      </div>
+
+      <div className="schedule-strip">
+        <div className={schedule0.off_peak_now ? "window off-peak" : "window peak"}>
+          <span>当前计费窗口</span>
+          <strong>{schedule0.off_peak_now ? "错峰 · 5 折" : "峰时 · 全价"}</strong>
+          <small>
+            {schedule0.off_peak_now
+              ? `本窗口还剩 ${formatCountdown(windowClosesIn)}`
+              : `${formatCountdown(nextOffPeakIn)}后进入错峰`}
+          </small>
+        </div>
+        <div>
+          <span>峰时（北京时间）</span>
+          <strong>{(schedule0.peak_windows_beijing || []).join(" / ") || "09:00-12:00 / 14:00-18:00"}</strong>
+          <small>周一至周五，中国法定节假日全天错峰</small>
+        </div>
+        <div>
+          <span>下次窗口切换</span>
+          <strong>{formatBeijing(Date.parse(schedule0.next_change_utc) / 1000)}</strong>
+          <small>{schedule0.next_change_is_off_peak ? "切换后进入错峰" : "切换后进入峰时"}</small>
+        </div>
+        <div>
+          <span>自动复盘</span>
+          <strong className={status.auto_review_enabled ? "on" : "off"}>
+            {status.auto_review_enabled ? "已开启" : "已关闭"}
+          </strong>
+          <small>{owner ? "只有你能切换" : "访客只读"}</small>
+        </div>
+      </div>
+
+      <div className="preliminary-grid">
+        <article>
+          <header><Brain size={19} weight="fill" /><h2>自动复盘</h2></header>
+          {owner ? (
+            <>
+              <button
+                className={`auto-toggle ${status.auto_review_enabled ? "on" : "off"}`}
+                onClick={() => onToggleAuto(!status.auto_review_enabled)}
+                disabled={busy || (!status.auto_review_enabled && !promptState.configured)}
+              >
+                <ShieldCheck size={18} />
+                {status.auto_review_enabled ? "关闭自动复盘" : "开启自动复盘"}
+              </button>
+              <dl>
+                <div><dt>执行范围</dt><dd>最近 {status.batch_size || 3} 场已解析</dd></div>
+                <div><dt>使用模型</dt><dd>{status.model || "deepseek-flash"}</dd></div>
+                <div><dt>推理强度</dt><dd>{status.reasoning_effort || "high"}</dd></div>
+                <div><dt>API Key</dt><dd className={status.deepseek_key_configured ? "ok" : "warn"}>
+                  {status.deepseek_key_configured ? "已配置" : "未配置"}
+                </dd></div>
+                <div><dt>联网搜索</dt><dd className={webSearch.enabled && webSearch.available ? "ok" : "warn"}>
+                  {webSearch.enabled ? (webSearch.available ? "已开启" : "已开启但不可用") : "已关闭"}
+                </dd></div>
+                <div><dt>调度线程</dt><dd>{status.worker?.last_cycle_note || "—"}</dd></div>
+              </dl>
+              {!status.deepseek_key_configured && (
+                <div className="owner-error">
+                  <Key size={15} />服务器还没有写入 DeepSeek API Key，开启后也无法执行。
+                </div>
+              )}
+              {webSearch.enabled && !webSearch.available && (
+                <div className="dialog-note"><Globe size={15} />{webSearch.note}</div>
+              )}
+              <div className="center-actions">
+                <button onClick={onRefresh} disabled={busy}><Pulse size={16} />刷新状态</button>
+                <button onClick={onRunCycle} disabled={busy}><Flame size={16} />立即跑一次调度</button>
+              </div>
+              <div className="next-run">
+                <CloudCheck size={17} />
+                <span>
+                  {status.auto_review_enabled
+                    ? schedule0.off_peak_now
+                      ? "当前是错峰时段，调度线程会立刻处理待办。"
+                      : `已排到下个错峰窗口：${formatBeijing(Date.parse(schedule0.next_change_utc) / 1000)}。`
+                    : "自动复盘已关闭，服务器不会调用 DeepSeek。"}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="artifact-empty">
+              <ShieldCheck size={24} />
+              <span><strong>仅 Owner 可见开关</strong><small>普通访客只能查看已生成的初步解析文件。</small></span>
+            </div>
+          )}
+        </article>
+
+        <article className="prompt-card">
+          <header><FileText size={19} weight="fill" /><h2>初步解析 Prompt</h2></header>
+          {owner ? (
+            <>
+              <p className="prompt-hint">
+                把你的 Markdown Prompt 直接粘贴到下面，保存后会生成一个不可变的版本号；每次初步解析都会记录用的是哪一版。
+              </p>
+              <textarea
+                className="prompt-input"
+                value={promptDraft}
+                onChange={(event) => setPromptDraft(event.target.value)}
+                placeholder="# 初步解析规则&#10;&#10;1. 先给一句话结论……&#10;2. 按时间线列关键节点……"
+                spellCheck={false}
+              />
+              <div className="prompt-actions">
+                <label className="file-button">
+                  <FolderOpen size={16} />从本地读取 .md
+                  <input
+                    type="file"
+                    accept=".md,.markdown,.txt,text/markdown,text/plain"
+                    onChange={onLoadPromptFile}
+                  />
+                </label>
+                <button
+                  className="primary"
+                  onClick={onSavePrompt}
+                  disabled={busy || !promptDraft.trim()}
+                >
+                  <PaperPlaneTilt size={16} />保存为新版本
+                </button>
+              </div>
+              <dl>
+                <div><dt>当前生效版本</dt><dd>{promptState.active_revision ? `第 ${promptState.active_revision} 版` : "尚未配置"}</dd></div>
+                <div><dt>已保存版本数</dt><dd>{promptState.revision_count ?? 0}</dd></div>
+                <div><dt>正文字符数</dt><dd>{promptState.active_prompt?.char_count ?? 0}</dd></div>
+              </dl>
+              {(prompts?.revisions || []).length > 1 && (
+                <div className="revision-list">
+                  {(prompts.revisions || []).map((revision) => (
+                    <button
+                      key={revision.revision}
+                      className={revision.revision === prompts.active_revision ? "active" : ""}
+                      onClick={() => onActivatePrompt(revision.revision)}
+                      disabled={busy || revision.revision === prompts.active_revision}
+                    >
+                      第 {revision.revision} 版 · {revision.char_count} 字
+                      {revision.title ? ` · ${revision.title}` : ""}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="artifact-empty">
+              <FileMagnifyingGlass size={24} />
+              <span><strong>Prompt 由 Owner 维护</strong><small>访客看不到也不会影响服务器上已保存的版本。</small></span>
+            </div>
+          )}
+        </article>
+      </div>
+
+      <article className="preliminary-queue">
+        <header>
+          <div><Database size={19} weight="fill" /><h2>自动复盘范围（最近 {status.batch_size || 3} 场已解析）</h2></div>
+          <small>超出这个范围的比赛不会被自动解析，需要手动单场排队。</small>
+        </header>
+        {autoScope.length ? (
+          <div className="queue-rows">
+            {autoScope.map((match) => {
+              const job = jobByMatch.get(Number(match.id));
+              const review = reviewByMatch.get(Number(match.id));
+              return (
+                <div className="queue-row" key={match.id}>
+                  <img src={match.image} alt={`${match.heroZh}英雄头像`} />
+                  <span><strong>{match.id}</strong><small>{match.heroZh} · {match.result} · {match.duration}</small></span>
+                  <em
+                    className={review ? "done" : job?.status === "failed" ? "failed" : "waiting"}
+                    title={job?.last_error || ""}
+                  >
+                    {reviewStateLabel(job, review)}
+                  </em>
+                  <span className="queue-actions">
+                    {review ? (
+                      <>
+                        <a href={review.markdown.download_url}><DownloadSimple size={15} />Markdown</a>
+                        <a href={review.json.download_url}><FileText size={15} />JSON</a>
+                      </>
+                    ) : owner ? (
+                      <button onClick={() => onQueue(match.id)} disabled={busy}>
+                        <Flame size={15} />单场排队
+                      </button>
+                    ) : (
+                      <small className="muted">尚未生成</small>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="artifact-empty">
+            <FileMagnifyingGlass size={24} />
+            <span><strong>还没有已解析比赛</strong><small>比赛解析完成后才会自动进入初步解析队列。</small></span>
+          </div>
+        )}
+      </article>
+
+      <article className="preliminary-library">
+        <header>
+          <div><CloudCheck size={19} weight="fill" /><h2>已生成的初步解析</h2></div>
+          <small>{reviews.length} 份文件 · 支持一键下载</small>
+        </header>
+        {reviews.length ? (
+          <div className="review-file-grid">
+            {reviews.map((review) => (
+              <article key={review.match_id}>
+                <span>MATCH {review.match_id}</span>
+                <h3>{review.model || "deepseek-flash"} · {review.billing_window === "off_peak" ? "错峰" : "峰时"}</h3>
+                <p>
+                  生成于 {formatBeijing(review.generated_at)}｜Prompt 第 {review.prompt_revision} 版
+                  {review.cost?.estimated_usd != null ? `｜约 $${review.cost.estimated_usd}` : ""}
+                </p>
+                <div>
+                  <a href={review.markdown.download_url}><DownloadSimple size={15} />下载 Markdown</a>
+                  <a href={review.json.download_url}><FileText size={15} />下载 JSON</a>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="artifact-empty">
+            <Brain size={24} />
+            <span><strong>还没有生成过初步解析</strong><small>开启自动复盘后，服务器会在最近的错峰时段自动生成。</small></span>
+          </div>
+        )}
+      </article>
+
+      <div className="privacy-note">
+        <ShieldCheck size={18} />
+        初步解析属于机器生成的初稿，不替代深度复盘结论；联网搜索开启时，搜索到的网页内容会被当作不可信外部资料处理。
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [view, setView] = useState("archive");
   const [matches, setMatches] = useState(fallbackMatches);
@@ -415,6 +707,12 @@ function App() {
   const [notice, setNotice] = useState("");
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewLaunch, setReviewLaunch] = useState(null);
+  const [deepseek, setDeepseek] = useState(null);
+  const [prompts, setPrompts] = useState(null);
+  const [preliminary, setPreliminary] = useState([]);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [preliminaryBusy, setPreliminaryBusy] = useState(false);
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
   const [ownerAuthorizeOpen, setOwnerAuthorizeOpen] = useState(() => new URLSearchParams(window.location.search).get("owner") === "authorize");
   const flash = (message) => { setNotice(message); window.setTimeout(() => setNotice(""), 3000); };
 
@@ -493,6 +791,161 @@ function App() {
     refresh(); return () => { stopped = true; window.clearTimeout(timer); };
   }, []);
 
+  const loadPreliminary = async () => {
+    try {
+      const response = await fetch("/dota2/api/v1/preliminary-reviews", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      setPreliminary(Array.isArray(data.items) ? data.items : []);
+    } catch {
+      setPreliminary([]);
+    }
+  };
+
+  const loadPrompts = async () => {
+    try {
+      const response = await fetch("/dota2/api/v1/deepseek/prompts?include_content=true", { cache: "no-store" });
+      if (!response.ok) return null;
+      const data = await response.json();
+      setPrompts(data);
+      return data;
+    } catch {
+      return null;
+    }
+  };
+
+  const loadDeepseek = async () => {
+    try {
+      const response = await fetch("/dota2/api/v1/deepseek/status", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      setDeepseek(data);
+      return data;
+    } catch {
+      setDeepseek(null);
+      return null;
+    }
+  };
+
+  const refreshPreliminaryAll = async () => {
+    await Promise.all([loadDeepseek(), loadPrompts(), loadPreliminary()]);
+  };
+
+  useEffect(() => {
+    refreshPreliminaryAll();
+  }, [owner]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSeconds(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "preliminary") return undefined;
+    const timer = window.setInterval(() => {
+      loadDeepseek();
+      loadPreliminary();
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [view]);
+
+  const preliminaryAction = async (work, successMessage) => {
+    setPreliminaryBusy(true);
+    try {
+      const result = await work();
+      await refreshPreliminaryAll();
+      if (successMessage) flash(successMessage);
+      return result;
+    } catch (caught) {
+      if (String(caught.message).includes("Owner")) setOwner(false);
+      flash(caught.message || "操作失败");
+      return null;
+    } finally {
+      setPreliminaryBusy(false);
+    }
+  };
+
+  const toggleAutoReview = (next) => preliminaryAction(async () => {
+    const response = await fetch("/dota2/api/v1/deepseek/settings", {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_review_enabled: next }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "切换失败");
+    return data;
+  }, next ? "自动复盘已开启，将在错峰时段执行" : "自动复盘已关闭");
+
+  const savePrompt = () => preliminaryAction(async () => {
+    const response = await fetch("/dota2/api/v1/deepseek/prompts", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: promptDraft, title: "" }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "保存 Prompt 失败");
+    return data;
+  }, "Prompt 已保存为新版本");
+
+  const activatePrompt = (revision) => preliminaryAction(async () => {
+    const response = await fetch("/dota2/api/v1/deepseek/prompts/active", {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ revision }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "切换版本失败");
+    return data;
+  }, `已切换到第 ${revision} 版`);
+
+  const loadPromptFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      setPromptDraft(await file.text());
+      flash(`已读入 ${file.name}，请检查后保存`);
+    } catch {
+      flash("读取文件失败");
+    }
+  };
+
+  const queuePreliminary = (id) => preliminaryAction(async () => {
+    const response = await fetch("/dota2/api/v1/deepseek/preliminary-reviews", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ match_id: Number(id) }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "排队失败");
+    return data;
+  }, `比赛 ${id} 已排队，将在错峰时段解析`);
+
+  const runPreliminaryCycle = () => preliminaryAction(async () => {
+    const response = await fetch("/dota2/api/v1/deepseek/run-now", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "执行失败");
+    const labels = {
+      processed: "已处理待办", idle: "没有待办", waiting: "峰时，已等待错峰",
+      deferring: "错峰窗口太短，已顺延", disabled: "自动复盘未开启", busy: "调度器正在运行",
+    };
+    flash(labels[data.action] || data.action || "已执行");
+    return data;
+  }, "");
+
+  useEffect(() => {
+    if (!prompts?.active_revision || promptDraft) return;
+    const active = (prompts.revisions || []).find((item) => item.revision === prompts.active_revision);
+    if (active?.content) setPromptDraft(active.content);
+  }, [prompts]);
+
   const currentMatch = useMemo(() => workspace?.match ? normalizeMatch(workspace.match) : matches.find((match) => match.id === matchId) || matches[0], [workspace, matches, matchId]);
   const profiles = useMemo(() => mergeProfiles(workspace, profileData), [profileData, workspace]);
   const closeOwnerAuthorize = () => { setOwnerAuthorizeOpen(false); const url = new URL(window.location.href); url.searchParams.delete("owner"); window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`); };
@@ -531,6 +984,28 @@ function App() {
         {view === "archive" && <HistoricalArchive profiles={profiles} benchmark={profileData?.benchmark} loading={profileLoading} error={profileError} status={profileData?.status} onOpen={setSelectedPlayer} />}
         {view === "profiles" && <ProfilesView profiles={profiles} onOpen={setSelectedPlayer} />}
         {view === "reviews" && <ReviewsView matches={matches} onSelect={(id) => loadMatch(id, true)} />}
+        {view === "preliminary" && (
+          <ReviewCenter
+            owner={owner}
+            matches={matches}
+            currentMatchId={currentMatch?.id}
+            deepseek={deepseek}
+            prompts={prompts}
+            reviews={preliminary}
+            jobs={deepseek?.jobs || []}
+            nowSeconds={nowSeconds}
+            busy={preliminaryBusy}
+            onToggleAuto={toggleAutoReview}
+            onSavePrompt={savePrompt}
+            onActivatePrompt={activatePrompt}
+            onLoadPromptFile={loadPromptFile}
+            onQueue={queuePreliminary}
+            onRefresh={refreshPreliminaryAll}
+            onRunCycle={runPreliminaryCycle}
+            promptDraft={promptDraft}
+            setPromptDraft={setPromptDraft}
+          />
+        )}
         {view === "data" && <DataView workspace={workspace} inventory={inventory} monitor={monitor} />}
       </main>
       <footer><span>ASHFURY.CN/DOTA2 · MATCH INTELLIGENCE</span><span>PLAY BETTER. WITH EVIDENCE.</span></footer>

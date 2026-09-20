@@ -20,3 +20,18 @@
 - `https://ashfury.cn/dota2/api/historical-profile/test/last10`
 
 十局测试以最新一场天梯作为 Match X，严格排除 Match X，并选择在其开始前已经结束的最近 10 场天梯。测试不会对旧比赛提交真实 Parse。
+
+## 授权终端下载与 DeepSeek 初步解析
+
+- `terminal_access.py`：作用域化终端 Bearer 令牌（只存 SHA-256、带审计日志），
+  与 Owner 浏览器会话构成双通道只读下载；
+- `deepseek_review.py`：错峰窗口计算、Prompt 版本库、任务队列与设置；
+- `deepseek_worker.py`：错峰调度器，自动复盘只处理最近 3 场已解析比赛；
+- `web_search.py`：DeepSeek 没有服务端联网工具，因此以托管 `web_search`
+  function-calling 循环实现联网。
+
+接口清单、部署步骤与环境变量见
+[`../docs/terminal-download-and-deepseek-review.md`](../docs/terminal-download-and-deepseek-review.md)；
+可直接粘贴的 Prompt 模板见
+[`../docs/preliminary-review-prompt-template.md`](../docs/preliminary-review-prompt-template.md)。
+

@@ -26,13 +26,22 @@ Backend:
 cd backend
 python -m venv .venv
 .venv/bin/pip install fastapi httpx uvicorn
-.venv/bin/python -m unittest \
-  test_adaptive_watcher.py \
-  test_historical_profile_v01.py \
-  test_owner_review.py \
-  test_review_trigger.py \
-  test_owner_review_api.py
+.venv/bin/python -m unittest discover -p "test_*.py"
 ```
+
+## Authorized downloads and DeepSeek preliminary review
+
+The API serves scoped, audited `Bearer` tokens (in addition to the Owner browser
+session) so an authorized terminal can download parsed match JSON and generated
+preliminary reviews. Preliminary reviews run on DeepSeek **only inside the
+off-peak billing window** (weekdays 01:00-04:00 and 06:00-10:00 UTC are peak;
+everything else, plus weekends and Chinese public holidays, is off-peak at half
+price). Auto review covers only the **three most recently parsed matches**.
+
+DeepSeek exposes no server-side search tool, so web search is implemented as a
+server-hosted `web_search` function-calling loop against a configurable search
+provider. See [docs/terminal-download-and-deepseek-review.md](docs/terminal-download-and-deepseek-review.md)
+and the paste-ready [prompt template](docs/preliminary-review-prompt-template.md).
 
 ## Secrets and runtime data
 
