@@ -514,32 +514,18 @@ def read_api_key(key_path: Path | str) -> str:
 
 
 def estimate_cost(usage: dict, off_peak: bool = True) -> dict:
-    """Rough USD estimate for deepseek-flash; peak rates are exactly double."""
-    cache_hit = int(usage.get("prompt_cache_hit_tokens") or 0)
-    prompt_total = int(usage.get("prompt_tokens") or 0)
-    cache_miss = int(
-        usage.get("prompt_cache_miss_tokens")
-        if usage.get("prompt_cache_miss_tokens") is not None
-        else max(0, prompt_total - cache_hit)
-    )
-    completion = int(usage.get("completion_tokens") or 0)
-    multiplier = 1.0 if off_peak else 2.0
-    hit_cost = cache_hit / 1_000_000 * 0.003 * multiplier
-    miss_cost = cache_miss / 1_000_000 * 0.15 * multiplier
-    output_cost = completion / 1_000_000 * 0.6 * multiplier
-    return {
-        "currency": "USD",
-        "billing_window": "off_peak" if off_peak else "peak",
-        "prompt_cache_hit_tokens": cache_hit,
-        "prompt_cache_miss_tokens": cache_miss,
-        "completion_tokens": completion,
-        "estimated_usd": round(hit_cost + miss_cost + output_cost, 6),
-        "rate_table": {
-            "cache_hit_input_per_million": 0.003 * multiplier,
-            "cache_miss_input_per_million": 0.15 * multiplier,
-            "output_per_million": 0.6 * multiplier,
-        },
-    }
+    """Cost in CNY using DeepSeek's official price table for deepseek-flash.
+
+    Peak is 09:00-12:00 and 14:00-18:00 Beijing time on weekdays excluding
+    Chinese public holidays; off-peak is exactly half of peak.
+    """
+    from web_search import estimate_hosted_search_cost_cny
+
+    result = estimate_hosted_search_cost_cny(usage, off_peak=off_peak)
+    # Keep the historical key names available for callers and artifacts.
+    result["estimated_cny"] = result["cost_cny"]
+    result["rate_table"] = result["rate_table_cny_per_million"]
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -769,13 +755,18 @@ class ReviewJobStore:
         counts = {}
         for job in jobs:
             counts[job.get("status", "unknown")] = counts.get(job.get("status", "unknown"), 0) + 1
-        total_cost = sum(
-            float(entry.get("estimated_usd") or 0)
+        entries = [
+            entry
             for job in jobs
             for entry in (job.get("costs") or ([job["cost"]] if job.get("cost") else []))
-        )
+        ]
+        model_cost = sum(float(entry.get("cost_cny") or entry.get("estimated_cny") or 0) for entry in entries)
+        search_cost = sum(float(entry.get("search_cost_cny") or 0) for entry in entries)
         return {
             "total_jobs": len(jobs),
             "by_status": counts,
-            "estimated_total_usd": round(total_cost, 6),
+            "currency": "CNY",
+            "model_cost_cny": round(model_cost, 6),
+            "search_cost_cny": round(search_cost, 6),
+            "estimated_total_cny": round(model_cost + search_cost, 6),
         }

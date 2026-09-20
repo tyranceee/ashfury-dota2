@@ -41,6 +41,8 @@ from deepseek_review import (
     schedule_snapshot,
 )
 from web_search import (
+    available_providers,
+    resolve_provider,
     run_search_loop,
     search_available,
     search_provider_config,
@@ -586,6 +588,9 @@ class DeepSeekReviewWorker:
         search_config = search_provider_config()
         search_on = bool(settings.get("enable_web_search"))
         search_ready, search_reason = search_available(search_config) if search_on else (False, "disabled")
+        search_provider, search_provider_note = (
+            resolve_provider(search_config) if search_on else (search_config.get("provider"), "disabled")
+        )
         thinking = "enabled" if str(settings.get("reasoning_effort") or "high") != "none" else "disabled"
         if search_on and not search_ready:
             LOGGER.warning(
@@ -623,6 +628,8 @@ class DeepSeekReviewWorker:
                 )
                 result["web_search_used"] = False
                 result["citations"] = []
+                result["searches"] = []
+                result["search_cost_cny"] = 0.0
                 result["search_rounds"] = []
             LOGGER.info(
                 "DeepSeek usage match=%s prompt_chars=%s prompt_tokens=%s "
@@ -648,6 +655,13 @@ class DeepSeekReviewWorker:
 
         finished_at = int(time.time())
         cost = estimate_cost(result["usage"], off_peak=is_off_peak(started_at, self.holidays()))
+        # Hosted search is billed on top of the review completion, so the job
+        # cost carries both lines.
+        search_cost_cny = float(result.get("search_cost_cny") or 0.0)
+        cost["model_cost_cny"] = cost["cost_cny"]
+        cost["search_cost_cny"] = round(search_cost_cny, 6)
+        cost["cost_cny"] = round(cost["cost_cny"] + search_cost_cny, 6)
+        cost["estimated_cny"] = cost["cost_cny"]
         payload = {
             "schema_version": OUTPUT_SCHEMA_VERSION,
             "match_id": match_id,
@@ -671,9 +685,14 @@ class DeepSeekReviewWorker:
             "web_search": {
                 "enabled": bool(settings.get("enable_web_search")),
                 "available": search_ready,
+                "provider_id": search_provider,
+                "provider_note": search_provider_note,
                 "note": search_reason,
                 "used": bool(result.get("web_search_used")),
+                "search_count": len(result.get("searches") or []),
+                "search_cost_cny": result.get("search_cost_cny", 0.0),
                 "citations": result.get("citations") or [],
+                "searches": result.get("searches") or [],
                 "rounds": result.get("search_rounds") or [],
             },
             "context": {
@@ -710,7 +729,10 @@ class DeepSeekReviewWorker:
                 "match_id": match_id,
                 "model": result["model"],
                 "billing_window": cost["billing_window"],
-                "estimated_usd": cost["estimated_usd"],
+                "estimated_cny": cost["cost_cny"],
+                "model_cost_cny": cost["model_cost_cny"],
+                "search_cost_cny": cost["search_cost_cny"],
+                "search_count": len(result.get("searches") or []),
                 "tokens": result["usage"].get("total_tokens"),
             },
         )
@@ -793,6 +815,7 @@ class DeepSeekReviewWorker:
         schedule = self.schedule()
         search_config = search_provider_config()
         search_ready, search_reason = search_available(search_config)
+        provider_id, provider_note = resolve_provider(search_config)
         return {
             "schema_version": OUTPUT_SCHEMA_VERSION,
             "auto_review_enabled": bool(settings.get("auto_review_enabled")),
@@ -806,13 +829,19 @@ class DeepSeekReviewWorker:
             "deepseek_base_url": os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             "web_search": {
                 "enabled": bool(settings.get("enable_web_search")),
-                "provider": search_config.get("provider"),
                 "available": search_ready,
+                "provider_id": provider_id,
+                "provider_note": provider_note,
+                "configured_provider": search_config.get("provider"),
+                "known_providers": available_providers(),
                 "note": search_reason,
+                "allowed_domains": search_config.get("allowed_domains") or [],
                 "max_search_calls": int(settings.get("max_search_calls") or 5),
+                "query_policy": "verbatim_from_upstream_no_rewrite",
                 "mechanism": (
-                    "DeepSeek 没有服务端联网工具，联网通过服务器托管的 "
-                    "web_search function-calling 循环实现。"
+                    "默认使用 DeepSeek 托管搜索（Anthropic 兼容端点 "
+                    "api.deepseek.com/anthropic/v1/messages + web_search_20250305 服务端工具）；"
+                    "提供方可替换为 Tavily / Brave / SearXNG / 自定义。"
                 ),
             },
             "prompt": prompt_state,

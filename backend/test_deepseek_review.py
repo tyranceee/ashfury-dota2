@@ -91,6 +91,12 @@ class OffPeakWindowTest(unittest.TestCase):
 
 
 class CostEstimateTest(unittest.TestCase):
+    """Costs follow DeepSeek's official CNY table for deepseek-flash.
+
+    Off-peak: 1 CNY / 1M cache-miss input, 4 CNY / 1M output, 0.02 CNY / 1M
+    cache-hit input. Peak is exactly double.
+    """
+
     def test_off_peak_is_exactly_half_of_peak(self):
         usage = {
             "prompt_tokens": 1_000_000,
@@ -100,8 +106,9 @@ class CostEstimateTest(unittest.TestCase):
         }
         off = estimate_cost(usage, off_peak=True)
         peak = estimate_cost(usage, off_peak=False)
-        self.assertAlmostEqual(off["estimated_usd"], 0.75, places=6)
-        self.assertAlmostEqual(peak["estimated_usd"], 1.5, places=6)
+        self.assertEqual(off["currency"], "CNY")
+        self.assertAlmostEqual(off["cost_cny"], 5.0, places=6)   # 1 + 4
+        self.assertAlmostEqual(peak["cost_cny"], 10.0, places=6)  # 2 + 8
 
     def test_cache_hits_are_cheaper_than_misses(self):
         cheap = estimate_cost(
@@ -114,7 +121,23 @@ class CostEstimateTest(unittest.TestCase):
              "prompt_cache_miss_tokens": 1000, "completion_tokens": 0},
             off_peak=True,
         )
-        self.assertLess(cheap["estimated_usd"], dear["estimated_usd"])
+        self.assertLess(cheap["cost_cny"], dear["cost_cny"])
+        self.assertAlmostEqual(cheap["cost_cny"], 0.00002, places=8)
+        self.assertAlmostEqual(dear["cost_cny"], 0.001, places=8)
+
+    def test_hosted_search_requests_are_reported(self):
+        result = estimate_cost(
+            {"prompt_tokens": 1000, "prompt_cache_hit_tokens": 0,
+             "prompt_cache_miss_tokens": 1000, "completion_tokens": 100,
+             "server_tool_use": {"web_search_requests": 2}},
+            off_peak=True,
+        )
+        self.assertEqual(result["web_search_requests"], 2)
+
+    def test_pricing_snapshot_is_recorded(self):
+        result = estimate_cost({"prompt_tokens": 10, "completion_tokens": 1})
+        self.assertIn("pricing_snapshot", result)
+        self.assertIn("api-docs.deepseek.com", result["pricing_source"])
 
 
 class PromptStoreTest(unittest.TestCase):
@@ -218,11 +241,14 @@ class ReviewJobStoreTest(unittest.TestCase):
 
     def test_stats_accumulate_cost_history(self):
         job, _ = self.store.upsert_job(600, "b", 1, "m")
-        self.store.mark(job["job_id"], JOB_DONE, cost={"estimated_usd": 0.25})
-        self.store.mark(job["job_id"], JOB_DONE, cost={"estimated_usd": 0.5})
+        self.store.mark(job["job_id"], JOB_DONE, cost={"cost_cny": 0.25, "search_cost_cny": 0.05})
+        self.store.mark(job["job_id"], JOB_DONE, cost={"cost_cny": 0.5, "search_cost_cny": 0.1})
         stats = self.store.stats()
         self.assertEqual(stats["total_jobs"], 1)
-        self.assertAlmostEqual(stats["estimated_total_usd"], 0.75)
+        self.assertEqual(stats["currency"], "CNY")
+        self.assertAlmostEqual(stats["model_cost_cny"], 0.75)
+        self.assertAlmostEqual(stats["search_cost_cny"], 0.15)
+        self.assertAlmostEqual(stats["estimated_total_cny"], 0.9)
 
     def test_settings_clamp_out_of_range_values(self):
         updated = self.store.update_settings({

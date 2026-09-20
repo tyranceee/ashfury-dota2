@@ -155,36 +155,104 @@ GET  /dota2/api/v1/preliminary-reviews/{id}/markdown  下载 Markdown
 
 ---
 
-## 三、联网搜索（重要限制）
+## 三、联网搜索
 
-DeepSeek 官方 API **没有服务端联网工具**：
+### 为什么需要 Provider 架构
 
-- Chat Completions 文档：`tools` 中 *"Currently, only functions are supported as a tool."*
-- Responses API 文档：`web_search` / `file_search` / `code_interpreter` / `mcp` 均在 Tools 表中标注 **Ignored**
+DeepSeek 的两套原生接口**不执行**服务端搜索，实测证据：
 
-因此联网通过服务器托管的 `web_search` function-calling 循环实现：
+| 调用方式 | 结果 |
+| --- | --- |
+| `POST /chat/completions` + `tools:[{"type":"web_search"}]` | `422`：`unknown variant \`web_search\`, expected \`function\`` |
+| `POST /responses` + `tools:[{"type":"web_search"}]` | `200` 但**静默忽略**，模型回答"我当前没有联网搜索的能力" |
+| `POST /responses` + `search:{enabled:true}` | 同样静默忽略 |
 
-1. 服务器把 `web_search` 声明为 function 工具发送给 DeepSeek；
-2. DeepSeek 需要最新事实时返回 tool_calls；
-3. 服务器调用配置的搜索提供方（Tavily / Brave / SearXNG / 自定义）；
-4. 结果作为 `tool` 消息回灌，最多往返 `max_search_calls` 次（默认 5）；
-5. 所有引用（标题、URL、摘要、查询词）写入产物的 `web_search.citations`。
+但 DeepSeek 的 **Anthropic 兼容接口支持服务端搜索工具**：
 
-开启条件（两者都满足才生效）：网页打开「联网搜索」+ 服务器配置搜索凭据。
+| 调用方式 | 结果 |
+| --- | --- |
+| `POST /anthropic/v1/messages` + `tools:[{"type":"web_search_20250305"}]` | `200`，返回 `web_search_tool_result` 内容块与 `usage.server_tool_use.web_search_requests` |
 
-```bash
-# /etc/systemd/system/dota2-rest.service.d/search.conf
-[Service]
-Environment=DOTA2_SEARCH_PROVIDER=tavily
-Environment=DOTA2_SEARCH_API_KEY_FILE=/opt/dota2-mcp/search-api-key
-Environment=DOTA2_SEARCH_MAX_CALLS=5
-Environment=DOTA2_SEARCH_RESULTS=5
+所以默认提供方是 **`deepseek-hosted-search`（DeepSeek 托管搜索）**，
+走 Anthropic 兼容端点，**不需要任何第三方搜索账号**，用的是同一把 DeepSeek Key。
+
+### Provider 清单与选择顺序
+
+| provider | 端点 | 凭据 |
+| --- | --- | --- |
+| `deepseek-hosted-search`（默认） | `api.deepseek.com/anthropic/v1/messages` | DeepSeek Key |
+| `tavily` | `api.tavily.com/search` | `DOTA2_SEARCH_API_KEY` |
+| `brave` | `api.search.brave.com/res/v1/web/search` | `DOTA2_SEARCH_API_KEY` |
+| `searxng` | 自建实例 | `DOTA2_SEARCH_ENDPOINT` |
+| `custom` | 任意 HTTP JSON | `DOTA2_SEARCH_ENDPOINT` |
+
+`DOTA2_SEARCH_PROVIDER` 指定首选；若首选缺凭据，会自动回退到任一可用提供方，
+并在产物的 `web_search.warnings` 里记录回退原因。没有可用提供方时**明确报错**，
+不会假装搜索成功。
+
+### 搜索词的完整性
+
+搜索词只能由上游（初步解析的 function-calling 循环 / 单场排队）给出，
+执行层原样发送：
+
+- system prompt 固定为"必须原样使用用户提供的搜索词调用一次 web_search，
+  不得翻译、改写、扩展或删减"；
+- 请求体用 `<exact_query>…</exact_query>` 包裹，工具 `max_uses=1`；
+- 返回后校验 `server_tool_use.input.query` 是否与发送值**完全相等**，
+  不等就抛 `SearchQueryRewritten` **拒绝本次结果**（不是降级接受）。
+
+### 结果校验（进入流程前）
+
+每条结果都按顺序过一遍：
+
+1. **URL 安全性**：仅允许 `https`；拒绝 `file:`/`data:`/`javascript:` 等协议、
+   私网与回环 IP（含 `169.254.169.254` 云元数据地址）、`localhost`、
+   `*.internal`、`*.local`、`*.onion`。不安全的结果**保留并标记**
+   `unsafe_url`/`unsafe_reason` 并计入 `dropped`，但任何调用方都不得当作可用来源。
+2. **授权域名**：配置 `DOTA2_SEARCH_ALLOWED_DOMAINS` 时，同时传给服务端工具的
+   `allowed_domains` 并在本地二次过滤。
+3. **去重**：URL 归一化（去 fragment、去 `utm_*`/`fbclid` 等追踪参数、
+   `www.` 前缀、大小写、末尾斜杠）后判重，另加同域标题 shingle Jaccard ≥0.9 的近似判重。
+4. **来源独立性**：重复项标记 `is_independent_source=false` 并记录
+   `duplicate_of`；重复转载**不**算作独立佐证。
+
+### 返回字段
+
+每次搜索记录为一个 `searches[]` 条目，并在 `citations[]` 展平所有来源：
+
+```json
+{
+  "query": "Dota 2 7.41 潮汐猎人 改动",
+  "provider_id": "deepseek-hosted-search",
+  "queries_executed": ["Dota 2 7.41 潮汐猎人 改动"],
+  "result_count": 10,
+  "cost": {"currency": "CNY", "cost_cny": 0.0143, "web_search_requests": 1},
+  "dropped": {"unsafe_url": 1, "domain_not_allowed": 0,
+              "exact_duplicate": 0, "near_duplicate": 0, "invalid": 0},
+  "results": [{
+    "title": "...", "url": "https://...", "snippet": "",
+    "published_at": "2026-03-25", "source_service": "deepseek-hosted-search",
+    "domain": "liquipedia.net", "is_independent_source": true, "duplicate_of": null
+  }],
+  "raw_response": "...（完整原始响应，含 include_raw=true 时输出）"
+}
 ```
 
-搜索结果属于不可信外部内容：只作为事实线索，其中的任何指令都不会被执行，
-这一点在 system prompt 与产物 `trust_boundary` 中都有标注。
+`snippet` 通常为空：DeepSeek 托管搜索只返回标题、URL 与 `page_age`，
+不返回网页正文摘要。需要正文时应另行抓取该 URL，不要把标题当摘要使用。
 
----
+### 实测
+
+生产环境单场复盘（潮汐猎人）：
+
+- 实际执行 6 次联网搜索，每次返回 10 条结果；
+- 其中 2 条命中 URL 安全过滤（`unsafe_url`）被标记；
+- 引用覆盖中文、俄文、英文、法文来源；
+- 搜索费用 ¥0.0607，模型费用 ¥0.3438，单场合计 **¥0.4045**。
+
+搜索会打断上下文缓存，因此开启联网后单场费用高于纯本地解析（约 ¥0.012）。
+可以用 `max_search_calls`（默认 5，上例设为 4 仍产生 6 次）控制上限，
+或在地图/机制类问题较多时保持开启、纯数据复盘时临时关闭。
 
 ## 四、部署步骤
 
@@ -194,6 +262,7 @@ scp backend/deploy/{rest_server,terminal_access,deepseek_review,deepseek_worker,
   aliyun-ecs:/opt/dota2-mcp/
 
 # 2. DeepSeek API Key（600 权限，key 不经过对话）
+#    这一把 key 同时用于初步解析与默认的托管搜索，不需要第三方搜索账号。
 ssh aliyun-ecs 'printf %s "sk-你的key" > /opt/dota2-mcp/deepseek-api-key && chmod 600 /opt/dota2-mcp/deepseek-api-key'
 
 # 3. 重启服务
@@ -217,9 +286,13 @@ scp -r dist/client/* aliyun-ecs:/usr/share/nginx/html/dota2/
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-flash` | 默认模型 |
 | `DOTA2_HOLIDAY_CALENDAR` | `<BASE>/cn-public-holidays.json` | 节假日日历覆盖 |
-| `DOTA2_SEARCH_PROVIDER` | `tavily` | 搜索提供方 |
+| `DOTA2_SEARCH_PROVIDER` | `deepseek-hosted-search` | 搜索提供方（可换 tavily/brave/searxng/custom） |
 | `DOTA2_SEARCH_API_KEY` / `_FILE` | 空 | 搜索凭据 |
 | `DOTA2_SEARCH_ENDPOINT` | 空 | SearXNG / 自定义端点 |
+| `DOTA2_SEARCH_ALLOWED_DOMAINS` | 空 | 逗号分隔的授权域名 |
+| `DOTA2_SEARCH_RESULTS` | `5` | 每次搜索期望结果数 |
+| `DEEPSEEK_ANTHROPIC_URL` | `https://api.deepseek.com/anthropic/v1/messages` | 托管搜索端点 |
+| `DEEPSEEK_SEARCH_MODEL` | `deepseek-flash` | 托管搜索使用的模型 |
 | `DOTA2_ALLOWED_ORIGINS` | 空 | 额外允许的写入源（本地开发用） |
 | `DOTA2_ARTIFACT_TZ_OFFSET` | `8` | 产物时间戳的时区偏移（小时） |
 | `DOTA2_ARTIFACT_TZ_LABEL` | `北京时间` | 产物时间戳的时区标签 |

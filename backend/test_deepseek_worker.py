@@ -274,7 +274,8 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(payload["model"], "deepseek-flash")
         self.assertIn("一句话结论", payload["content_markdown"])
         self.assertEqual(payload["usage"]["prompt_cache_hit_tokens"], 100000)
-        self.assertGreater(payload["cost"]["estimated_usd"], 0)
+        self.assertGreater(payload["cost"]["cost_cny"], 0)
+        self.assertEqual(payload["cost"]["currency"], "CNY")
 
         markdown = markdown_path.read_text("utf-8")
         self.assertIn("比赛 9001 初步解析", markdown)

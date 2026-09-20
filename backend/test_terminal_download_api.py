@@ -332,7 +332,8 @@ class TerminalDownloadApiTests(unittest.TestCase):
         self.assertIn("off_peak_now", status["schedule"])
         self.assertFalse(status["deepseek_key_configured"])
         self.assertFalse(status["web_search"]["enabled"])
-        self.assertIn("function-calling", status["web_search"]["mechanism"])
+        self.assertIn("web_search_20250305", status["web_search"]["mechanism"])
+        self.assertEqual(status["web_search"]["query_policy"], "verbatim_from_upstream_no_rewrite")
 
     def test_prompt_upload_requires_owner_and_rejects_extra_fields(self):
         denied = self.client.post("/v1/deepseek/prompts", json={"content": "x"})

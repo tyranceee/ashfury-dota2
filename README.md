@@ -38,9 +38,14 @@ off-peak billing window** (weekdays 01:00-04:00 and 06:00-10:00 UTC are peak;
 everything else, plus weekends and Chinese public holidays, is off-peak at half
 price). Auto review covers only the **three most recently parsed matches**.
 
-DeepSeek exposes no server-side search tool, so web search is implemented as a
-server-hosted `web_search` function-calling loop against a configurable search
-provider. See [docs/terminal-download-and-deepseek-review.md](docs/terminal-download-and-deepseek-review.md)
+DeepSeek's native `chat/completions` and `responses` transports do not execute
+search, but its Anthropic-compatible transport does: `POST
+/anthropic/v1/messages` with the `web_search_20250305` server tool returns real
+`web_search_tool_result` blocks. That hosted search is the default provider and
+needs no third-party search account. Providers are swappable
+(`deepseek-hosted-search`, `tavily`, `brave`, `searxng`, `custom`), queries are
+sent verbatim and rejected if the service rewrites them, and results pass URL
+safety, allowed-domain, duplicate, and source-independence checks before use. See [docs/terminal-download-and-deepseek-review.md](docs/terminal-download-and-deepseek-review.md)
 and the paste-ready [prompt template](docs/preliminary-review-prompt-template.md).
 
 ## Secrets and runtime data
