@@ -477,7 +477,36 @@ def search_provider_config(env: dict | None = None) -> dict:
     }
 
 
+def deepseek_key_problem_text(config: dict) -> str:
+    """Explain precisely why the hosted provider cannot use the key file."""
+    from deepseek_review import api_key_problem
+
+    path = Path(config.get("deepseek_api_key_file") or "")
+    try:
+        value = path.read_text("utf-8").strip()
+    except OSError as error:
+        return f"DeepSeek API Key 文件无法读取：{path}（{error}）"
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    if mode & 0o077:
+        return f"DeepSeek API Key 文件权限必须是 600，当前是 {mode:o}：{path}"
+    problem = api_key_problem(value)
+    if problem:
+        return f"{problem}（{path}）"
+    return f"DeepSeek API Key 不可用：{path}"
+
+
 def resolve_deepseek_key(config: dict) -> str:
+    """Read the DeepSeek key used by the hosted-search transport.
+
+    Returns "" for any unusable key (missing, loose permissions, or containing
+    characters that cannot be placed in an HTTP header) so readiness reporting
+    can explain the problem instead of failing mid-request.
+    """
+    from deepseek_review import api_key_problem
+
     path = Path(config.get("deepseek_api_key_file") or "")
     try:
         value = path.read_text("utf-8").strip()
@@ -489,7 +518,7 @@ def resolve_deepseek_key(config: dict) -> str:
             return ""
     except OSError:
         return ""
-    return value
+    return "" if api_key_problem(value) else value
 
 
 # ---------------------------------------------------------------------------
@@ -768,10 +797,7 @@ def provider_ready(provider: str, config: dict | None = None) -> tuple[bool, str
     if provider == PROVIDER_DEEPSEEK_HOSTED:
         if resolve_deepseek_key(config):
             return True, "ready"
-        return False, (
-            "DeepSeek API Key 缺失或权限不是 600："
-            f"{config.get('deepseek_api_key_file')}"
-        )
+        return False, deepseek_key_problem_text(config)
     key = config.get("api_key") or ""
     if not key and config.get("api_key_file"):
         try:

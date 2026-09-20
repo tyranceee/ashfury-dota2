@@ -93,6 +93,21 @@ class StubClient:
             raise DeepSeekRequestError("DeepSeek HTTP 500: upstream failure")
         if StubClient.behavior == "config_error":
             raise DeepSeekConfigError("DeepSeek API key file is missing")
+        if StubClient.behavior == "truncated":
+            # Output budget consumed entirely by reasoning: no visible content.
+            return {
+                "content": "",
+                "reasoning_content": "思考被截断",
+                "tool_calls": [],
+                "finish_reason": "length",
+                "usage": {
+                    "prompt_tokens": 120000, "completion_tokens": 64000,
+                    "total_tokens": 184000,
+                    "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 120000,
+                },
+                "model": self.model,
+                "response_id": "resp_truncated",
+            }
         usage = {
             "prompt_tokens": 120000,
             "completion_tokens": 4000,
@@ -113,7 +128,25 @@ class StubClient:
                 "response_id": f"resp_tool_{index}",
             }
         return {
-            "content": "# 一句话结论\n\n本场节奏由 Roshan 窗口决定。\n",
+            "content": (
+                "# 一句话结论\n\n本场节奏由 Roshan 窗口决定："
+                "20 分钟经济领先 3k 后靠第一次肉山盾扩大优势并破掉中路二塔 [数据]，"
+                "但中期一次无买活的强开导致节奏中断，把比赛拖长了约十分钟 [判断]。\n\n"
+                "# 本场要点\n\n"
+                "- [数据] 对线期补刀领先，正补 51 比 33，6 分钟被对方辅助游走一次。\n"
+                "- [数据] 第一次肉山（2048 秒）由本人拿盾，随后连破两座外塔。\n"
+                "- [判断] 团战参战率 54.5% 低于同队另两名核心，正面输出缺口明显。\n"
+                "- [数据] 建筑伤害 7663 全队第一，分推收益确实落地了。\n\n"
+                "# 时间线证据\n\n"
+                "- 34:08 · 天辉击杀肉山，神盾由本人取得 · 依据 objectives 的 CHAT_MESSAGE_AEGIS [数据]\n"
+                "- 44:41 · 夜魇连破天辉中路兵营，同期丢高地塔 [数据]\n\n"
+                "# 主要问题\n\n"
+                "1. 分带期被抓，累计经济损失超过 3000 金币，其中一次 835 金币 [数据]。\n"
+                "2. 肉山优势没有及时转成兵营优势，比赛被拖到 53:46 [判断]。\n\n"
+                "# 下一局可执行动作\n\n"
+                "1. 带线前先在对方接应方向留一枚视野，再决定是否交分身撤退。\n"
+                "2. 把团战参战率目标定在 65% 以上，对方拿盾后 5 分钟内必须靠近队友。\n"
+            ),
             "reasoning_content": "",
             "tool_calls": [],
             "finish_reason": "stop",
@@ -395,6 +428,78 @@ class WorkerTestCase(unittest.TestCase):
 
     def test_output_readers_return_none_before_generation(self):
         self.assertIsNone(self.worker.read_output(9999))
+
+    # ----- truncation and empty-output guards --------------------------
+
+    def test_empty_content_with_length_finish_is_rejected(self):
+        from deepseek_worker import completion_problem
+
+        problem = completion_problem({"content": "", "finish_reason": "length"}, 32000)
+        self.assertIsNotNone(problem)
+        self.assertIn("截断", problem)
+        self.assertIn("32000", problem)
+
+    def test_truncated_but_nonempty_content_is_rejected(self):
+        from deepseek_worker import completion_problem
+
+        problem = completion_problem(
+            {"content": "# 一句话结论\n\n" + "x" * 400, "finish_reason": "length"}, 32000
+        )
+        self.assertIsNotNone(problem)
+        self.assertIn("不完整", problem)
+
+    def test_tiny_content_is_rejected(self):
+        from deepseek_worker import completion_problem
+
+        self.assertIsNotNone(
+            completion_problem({"content": "太短", "finish_reason": "stop"}, 32000)
+        )
+
+    def test_healthy_completion_is_accepted(self):
+        from deepseek_worker import completion_problem
+
+        self.assertIsNone(completion_problem(
+            {"content": "# 一句话结论\n\n" + "分析内容。" * 80, "finish_reason": "stop"},
+            64000,
+        ))
+
+    def test_truncated_reply_is_retried_with_a_larger_budget_not_written(self):
+        """Regression: an empty truncated reply used to be written as an artifact."""
+        self.prompts.create_revision("# prompt")
+        StubClient.behavior = "truncated"
+        job, _ = self.jobs.upsert_job(9001, "b9001", 1, "deepseek-flash")
+
+        outcome = self.worker.run_job(job["job_id"])
+
+        self.assertEqual(outcome["status"], "retry_scheduled")
+        stored = self.jobs.get(job["job_id"])
+        self.assertEqual(stored["status"], JOB_PENDING)
+        self.assertIn("截断", stored["last_error"])
+        self.assertEqual(stored["truncation_retries"], 1)
+        self.assertEqual(self.jobs.settings()["max_output_tokens"], 128000)
+        # Crucially, no empty artifact was written over a good review.
+        self.assertFalse(self.worker.output_paths(9001)["json"].is_file())
+        self.assertFalse(self.worker.output_paths(9001)["markdown"].is_file())
+
+    def test_truncation_gives_up_after_three_attempts(self):
+        self.prompts.create_revision("# prompt")
+        StubClient.behavior = "truncated"
+        job, _ = self.jobs.upsert_job(9001, "b9001", 1, "deepseek-flash")
+        for _ in range(3):
+            outcome = self.worker.run_job(job["job_id"])
+        self.assertEqual(outcome["status"], JOB_FAILED)
+        self.assertFalse(self.worker.output_paths(9001)["json"].is_file())
+
+    def test_a_failed_regeneration_leaves_the_previous_artifact_intact(self):
+        self.prompts.create_revision("# prompt")
+        json_path = self.worker.output_paths(9001)["json"]
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text('{"match_id": 9001, "content_markdown": "旧的好复盘"}', encoding="utf-8")
+        StubClient.behavior = "truncated"
+        job, _ = self.jobs.upsert_job(9001, "b9001", 1, "deepseek-flash")
+        for _ in range(3):
+            self.worker.run_job(job["job_id"])
+        self.assertIn("旧的好复盘", json_path.read_text("utf-8"))
 
     def test_artifact_timestamp_uses_an_explicit_timezone(self):
         # 2026-09-20 13:06:30 UTC must be reported as 21:06:30 in Beijing.

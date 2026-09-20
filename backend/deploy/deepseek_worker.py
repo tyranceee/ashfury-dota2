@@ -24,6 +24,7 @@ from pathlib import Path
 
 from deepseek_review import (
     DEFAULT_MAX_OUTPUT_TOKENS,
+    MIN_USABLE_REVIEW_CHARS,
     DeepSeekConfigError,
     DeepSeekRequestError,
     JOB_DONE,
@@ -78,6 +79,33 @@ def artifact_timestamp(epoch_seconds: int) -> str:
         int(epoch_seconds), dt.timezone.utc
     ) + dt.timedelta(hours=ARTIFACT_TIMEZONE_OFFSET_HOURS)
     return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def completion_problem(result: dict, max_tokens: int) -> str | None:
+    """Describe why a completion cannot become a usable review file.
+
+    Returns None when the completion is good enough to write out.
+    """
+    content = (result.get("content") or "").strip()
+    finish_reason = result.get("finish_reason")
+    if finish_reason == "length" and not content:
+        return (
+            f"模型输出 {max_tokens} tokens 全部用于思考后被截断，正文为空"
+            "（finish_reason=length）"
+        )
+    if not content:
+        return f"模型没有返回正文（finish_reason={finish_reason}）"
+    if finish_reason == "length":
+        return (
+            f"模型输出达到上限 {max_tokens} tokens 被截断，正文可能不完整"
+            "（finish_reason=length）"
+        )
+    if len(content) < MIN_USABLE_REVIEW_CHARS:
+        return (
+            f"正文只有 {len(content)} 字符，低于可用下限 "
+            f"{MIN_USABLE_REVIEW_CHARS} 字符"
+        )
+    return None
 
 
 def match_compact_json(match_data: dict, account_id: int) -> dict:
@@ -652,6 +680,28 @@ class DeepSeekReviewWorker:
                 return {"job_id": job_id, "status": JOB_FAILED, "error": str(error)}
             self.job_store.mark(job_id, JOB_PENDING, error=str(error))
             return {"job_id": job_id, "status": "retry_scheduled", "error": str(error)}
+
+        # A completion that ran out of output budget mid-reasoning returns empty
+        # content. Writing that out would replace a good review with an empty
+        # file, so it is treated as a failure and retried with a larger budget.
+        unusable = completion_problem(result, max_tokens)
+        if unusable:
+            truncation_retries = int(job.get("truncation_retries") or 0) + 1
+            raised = min(max_tokens * 2, MAX_OUTPUT_TOKENS_HARD_CAP)
+            self.job_store.update_settings({"max_output_tokens": raised})
+            detail = (
+                f"{unusable}；输出上限已从 {max_tokens} 提高到 {raised}"
+                f"（第 {truncation_retries} 次截断重试）"
+            )
+            if truncation_retries >= 3:
+                self.job_store.mark(job_id, JOB_FAILED, error=detail)
+                return {"job_id": job_id, "status": JOB_FAILED, "error": detail}
+            self.job_store.mark(
+                job_id, JOB_PENDING, error=detail,
+                extra={"truncation_retries": truncation_retries},
+            )
+            LOGGER.warning("Preliminary review needs a retry: %s", detail)
+            return {"job_id": job_id, "status": "retry_scheduled", "error": detail}
 
         finished_at = int(time.time())
         cost = estimate_cost(result["usage"], off_peak=is_off_peak(started_at, self.holidays()))

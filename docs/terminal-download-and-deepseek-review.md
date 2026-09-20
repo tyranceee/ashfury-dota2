@@ -263,12 +263,19 @@ scp backend/deploy/{rest_server,terminal_access,deepseek_review,deepseek_worker,
 
 # 2. DeepSeek API Key（600 权限，key 不经过对话）
 #    这一把 key 同时用于初步解析与默认的托管搜索，不需要第三方搜索账号。
-ssh aliyun-ecs 'printf %s "sk-你的key" > /opt/dota2-mcp/deepseek-api-key && chmod 600 /opt/dota2-mcp/deepseek-api-key'
+#
+#    ⚠️ 不要整段照抄，也不要把尖括号或中文占位符写进文件。
+#    先把 <REAL_KEY> 换成真实 key（形如 sk- 加 32 位十六进制）再执行。
+#    key 文件必须是纯 ASCII，否则服务会在读取时直接报错拒绝。
+ssh aliyun-ecs 'printf %s "<REAL_KEY>" > /tmp/dsk && install -o admin -g admin -m 600 /tmp/dsk /opt/dota2-mcp/deepseek-api-key && rm -f /tmp/dsk'
 
-# 3. 重启服务
+# 3. 校验：应为 35 字节左右且纯 ASCII
+ssh aliyun-ecs 'sudo wc -c < /opt/dota2-mcp/deepseek-api-key; sudo LC_ALL=C grep -qP "^[\x20-\x7e]+$" /opt/dota2-mcp/deepseek-api-key && echo "ASCII OK" || echo "含非 ASCII，请重新写入"'
+
+# 4. 重启服务
 ssh aliyun-ecs 'sudo systemctl restart dota2-rest.service && systemctl is-active dota2-rest.service'
 
-# 4. 前端
+# 5. 前端
 cd frontend && npm run build
 scp -r dist/client/* aliyun-ecs:/usr/share/nginx/html/dota2/
 ```
@@ -299,7 +306,7 @@ scp -r dist/client/* aliyun-ecs:/usr/share/nginx/html/dota2/
 | `DOTA2_CONTEXT_BUDGET_CHARS` | `700000` | 默认上下文预算（可被设置覆盖） |
 | `DOTA2_ACCOUNT_ID` | `212121467` | 用于在解析数据里定位主人自己的行 |
 
-## 六、产物内容
+## 六、产物内容与完整性校验
 
 Markdown 产物结尾会写明生成时间（带明确时区，不使用宿主机的 `localtime`，
 因为容器可能报告 CST 而进程仍按 UTC 运行）、模型、计费窗口、Prompt 版本与总 token。
@@ -311,7 +318,25 @@ JSON 产物除正文外还包含：
 - `web_search`：是否启用、是否可用、实际调用轮数与全部引用；
 - `trust_boundary`：数据被当作不可信内容处理的标记。
 
-`/v1/deepseek/status` 也会返回 `stats.estimated_total_usd`，方便长期观察花费。
+`/v1/deepseek/status` 也会返回 `stats.estimated_total_cny`，方便长期观察花费。
+
+### 输出预算与截断防护
+
+DeepSeek 在思考模式下默认输出上限是 64K（`reasoning_effort=max` 时 128K），
+非思考模式只有 8K。复盘在思考模式下处理大上下文，所以 `max_output_tokens`
+默认取思考模式的下限 **64000**；把上限设成 32000 会让模型把预算全部烧在思考上、
+`finish_reason=length` 且正文为空，而且一次工具调用都发不出来（联网搜索因此静默失效）。
+
+更重要的是：**只有通过完整性校验的正文才会落盘**。校验规则（`completion_problem`）：
+
+| 情况 | 处理 |
+| --- | --- |
+| `finish_reason=length` 且正文为空 | 判定失败，输出上限翻倍后重试（最多 3 次） |
+| `finish_reason=length` 但正文非空 | 判定不完整，同上重试 |
+| 正文短于 200 字符 | 判定不可用，同上重试 |
+| 三次重试仍失败 | 任务标记 `failed` 并写明原因 |
+
+失败时**不会写出产物**，因此不会用空文件覆盖掉已有的好复盘。
 
 ## 七、测试
 

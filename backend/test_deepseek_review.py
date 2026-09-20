@@ -398,6 +398,49 @@ class DeepSeekClientWireFormatTest(unittest.TestCase):
             with self.assertRaises(DeepSeekConfigError):
                 read_api_key(path)
 
+    def test_placeholder_key_with_chinese_characters_is_rejected(self):
+        """A key file holding the Chinese placeholder must fail loudly.
+
+        This exact mistake happened in production: the deployment snippet in the
+        docs contained that placeholder and it was executed verbatim, so every
+        hosted search died with an opaque ascii codec error mid-request.
+        """
+        import tempfile
+        from pathlib import Path as _Path
+        from deepseek_review import DeepSeekConfigError, read_api_key
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = _Path(directory) / "deepseek-api-key"
+            path.write_text("sk-\u4f60\u7684key", encoding="utf-8")
+            path.chmod(0o600)
+            with self.assertRaises(DeepSeekConfigError) as caught:
+                read_api_key(path)
+            message = str(caught.exception)
+            self.assertIn("non-ASCII", message)
+            self.assertIn("placeholder", message)
+
+    def test_key_file_with_a_utf8_bom_is_rejected(self):
+        import tempfile
+        from pathlib import Path as _Path
+        from deepseek_review import DeepSeekConfigError, read_api_key
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = _Path(directory) / "deepseek-api-key"
+            path.write_bytes(b"\xef\xbb\xbfsk-real-key")
+            path.chmod(0o600)
+            with self.assertRaises(DeepSeekConfigError):
+                read_api_key(path)
+
+    def test_api_key_problem_detects_the_common_mistakes(self):
+        from deepseek_review import api_key_problem
+
+        self.assertIsNone(api_key_problem("sk-0123456789abcdef0123456789abcdef"))
+        self.assertIn("non-ASCII", api_key_problem("sk-\u4f60\u7684key"))
+        self.assertIn("non-ASCII", api_key_problem("sk-\ufeffabc"))
+        self.assertIn("embedded whitespace", api_key_problem("sk-abc def"))
+        self.assertIn("does not start", api_key_problem("c39edc811d6a4517"))
+        self.assertIn("empty", api_key_problem(""))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,13 @@ DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.co
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_API_KEY_FILE = "deepseek-api-key"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 900
-DEFAULT_MAX_OUTPUT_TOKENS = 32000
+# DeepSeek defaults to 8K output in non-thinking mode and 64K in thinking mode
+# (128K at reasoning_effort=max). Reviews run in thinking mode over a large
+# context, so an 8K-style budget starves the model: it spends the whole budget
+# on reasoning, returns finish_reason="length" with empty content, and no tool
+# call is ever emitted. Keep the default at the thinking-mode floor.
+DEFAULT_MAX_OUTPUT_TOKENS = 64000
+MIN_USABLE_REVIEW_CHARS = 200
 DEFAULT_BATCH_SIZE = 3
 MAX_BATCH_SIZE = 10
 MAX_PROMPT_CHARS = 200000
@@ -505,7 +511,35 @@ def read_api_key(key_path: Path | str) -> str:
         raise DeepSeekConfigError(
             f"DeepSeek API key file permissions must be 600, found {mode:o}"
         )
+    # A key ends up in an HTTP header, which is ASCII-only. Catch a BOM, a
+    # non-breaking space, or a forgotten placeholder here instead of letting it
+    # surface later as an opaque codec error in the middle of a request.
+    problem = api_key_problem(value)
+    if problem:
+        raise DeepSeekConfigError(problem)
     return value
+
+
+def api_key_problem(value: str) -> str | None:
+    """Return a human-readable description if ``value`` is not a usable key."""
+    if not value:
+        return "DeepSeek API key is empty"
+    offending = [(index, char) for index, char in enumerate(value) if ord(char) > 127]
+    if offending:
+        sample = "".join(char for _, char in offending[:6])
+        return (
+            f"DeepSeek API key contains non-ASCII characters ({sample!r} at "
+            f"position {offending[0][0]}), so it cannot be sent as an HTTP header. "
+            "This usually means a placeholder such as a Chinese 'your key' "
+            "template was written into the key file instead of the real key."
+        )
+    if value != value.strip():
+        return "DeepSeek API key has stray surrounding whitespace"
+    if any(char.isspace() for char in value):
+        return "DeepSeek API key contains embedded whitespace"
+    if not value.startswith("sk-"):
+        return "DeepSeek API key does not start with 'sk-'"
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -717,6 +751,7 @@ class ReviewJobStore:
         output_path: str | None = None,
         cost: dict | None = None,
         increment_attempts: bool = False,
+        extra: dict | None = None,
     ) -> dict | None:
         with self._lock:
             data = self._load()
@@ -734,6 +769,8 @@ class ReviewJobStore:
                 job.setdefault("costs", []).append(cost)
             if increment_attempts:
                 job["attempts"] = int(job.get("attempts") or 0) + 1
+            if extra:
+                job.update(extra)
             if status in {JOB_DONE, JOB_FAILED}:
                 job["finished_at"] = int(time.time())
             self._save(data)
