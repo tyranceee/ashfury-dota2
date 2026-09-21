@@ -256,6 +256,12 @@ main { padding: 16px 22px 0; }
 .queue-actions a, .queue-actions button { display: flex; align-items: center; gap: 5px; border: 1px solid #5d5341; background: #12191a; color: #cdb992; padding: 6px 9px; text-decoration: none; cursor: pointer; font: inherit; font-size: 9px; }
 .queue-actions button:disabled { opacity: .5; cursor: wait; }
 .queue-actions .muted { color: #6f6a62; font-size: 9px; }
+.queue-actions button.force-run { border-color: #a16a42; background: #4b261d; color: #f4c596; }
+.queue-actions button.force-run:disabled { opacity: .5; cursor: wait; }
+.queue-divider { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 14px 0 7px; padding-top: 12px; border-top: 1px dashed #4e4436; }
+.queue-divider span { color: #cdb992; font-size: 11px; }
+.queue-divider small { color: #85806f; font-size: 9px; }
+.queue-row.out-of-scope { border-style: dashed; }
 .review-file-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
 .review-file-grid article { border: 1px solid #4e4436; background: rgba(11, 16, 16, .9); padding: 14px; }
 .review-file-grid h3 { margin: 0; color: #ddc59c; font-size: 15px; }

@@ -247,8 +247,9 @@ class WorkerTestCase(unittest.TestCase):
         self.assertEqual(result["action"], "deferring")
         self.assertEqual(result["resume_at"], int(utc(2026, 9, 21, 4).timestamp()))
         self.assertEqual(StubClient.calls, [])
-        # The batch is registered but must not have been executed.
-        self.assertEqual(len(self.jobs.pending()), 3)
+        # The batch is registered but must not have been executed. The fixture
+        # has four parsed matches, so the whole scope is queued.
+        self.assertEqual(len(self.jobs.pending()), 4)
         self.assertTrue(all(job["status"] == JOB_PENDING for job in self.jobs.pending()))
 
     def test_enough_runway_lets_the_same_job_start(self):
@@ -408,6 +409,72 @@ class WorkerTestCase(unittest.TestCase):
         self.assertIn(statuses.get(9003), {JOB_PAUSED, JOB_PENDING})
         self.assertEqual(cycle.get("action"), "processed")
 
+    # ----- manual (forced) runs ----------------------------------------
+
+    def test_forced_cycle_runs_during_peak_hours(self):
+        """A manual trigger must not be blocked by the off-peak guard."""
+        self.prompts.create_revision("# prompt")
+        self.jobs.update_settings({"auto_review_enabled": True, "batch_size": 1})
+        self.now = utc(2026, 9, 21, 7)  # Monday peak window
+
+        blocked = self.worker.tick()
+        self.assertEqual(blocked["action"], "waiting")
+        self.assertEqual(StubClient.calls, [])
+
+        forced = self.worker.tick(force=True)
+        self.assertEqual(forced["action"], "processed")
+        self.assertTrue(forced["forced"])
+        self.assertIn("峰时", forced["billing_warning"])
+        self.assertEqual(len(StubClient.calls), 1)
+
+    def test_forced_cycle_works_with_auto_review_disabled(self):
+        self.prompts.create_revision("# prompt")
+        self.jobs.upsert_job(9001, "m9001", 1, "deepseek-flash")
+        self.now = utc(2026, 9, 21, 7)
+        result = self.worker.tick(force=True, only_match_id=9001)
+        self.assertEqual(result["action"], "processed")
+        self.assertEqual(len(StubClient.calls), 1)
+
+    def test_single_match_scope_does_not_touch_other_jobs(self):
+        """A manual click must not drain unrelated queued work at peak prices."""
+        self.prompts.create_revision("# prompt")
+        self.jobs.update_settings({"auto_review_enabled": True, "batch_size": 3})
+        self.worker.enqueue_recent_parsed()
+        self.assertEqual(len(self.jobs.pending()), 3)
+
+        self.now = utc(2026, 9, 21, 7)  # peak
+        result = self.worker.tick(force=True, only_match_id=9002)
+
+        self.assertEqual(result["action"], "processed")
+        self.assertEqual(len(StubClient.calls), 1)
+        statuses = {job["match_id"]: job["status"] for job in self.jobs.list_jobs()}
+        self.assertEqual(statuses[9002], JOB_DONE)
+        self.assertEqual(statuses[9001], JOB_PENDING)
+        self.assertEqual(statuses[9003], JOB_PENDING)
+
+    def test_single_match_scope_skips_an_already_done_match(self):
+        self.prompts.create_revision("# prompt")
+        job, _ = self.jobs.upsert_job(9001, "m9001", 1, "deepseek-flash")
+        self.jobs.mark(job["job_id"], JOB_DONE, output_path="/tmp/x.json")
+        result = self.worker.tick(force=True, only_match_id=9001)
+        self.assertEqual(result["action"], "already_done")
+        self.assertEqual(StubClient.calls, [])
+
+    def test_single_match_scope_ignores_unknown_matches(self):
+        self.prompts.create_revision("# prompt")
+        result = self.worker.tick(force=True, only_match_id=999999)
+        self.assertEqual(result["action"], "idle")
+        self.assertEqual(StubClient.calls, [])
+
+    def test_automatic_cycles_never_force(self):
+        """Regression guard: the schedule, not a manual flag, governs auto runs."""
+        self.prompts.create_revision("# prompt")
+        self.jobs.update_settings({"auto_review_enabled": True, "batch_size": 1})
+        self.now = utc(2026, 9, 21, 7)
+        for _ in range(3):
+            self.assertEqual(self.worker.tick()["action"], "waiting")
+        self.assertEqual(StubClient.calls, [])
+
     def test_worker_does_not_start_a_second_cycle_while_busy(self):
         self.worker._work_lock.acquire()
         try:
@@ -424,7 +491,7 @@ class WorkerTestCase(unittest.TestCase):
         self.assertTrue(status["deepseek_key_configured"])
         self.assertFalse(status["prompt"]["configured"])
         self.assertIn("off_peak_now", status["schedule"])
-        self.assertEqual(status["batch_size"], 3)
+        self.assertEqual(status["batch_size"], 5)
 
     def test_output_readers_return_none_before_generation(self):
         self.assertIsNone(self.worker.read_output(9999))

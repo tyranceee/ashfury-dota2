@@ -407,21 +407,30 @@ class DeepSeekReviewWorker:
     def off_peak_now(self) -> bool:
         return is_off_peak(self.now_provider(), self.holidays())
 
-    def tick(self) -> dict:
-        """One scheduler cycle. Safe to call from tests and from the thread."""
+    def tick(self, force: bool = False, only_match_id: int | None = None) -> dict:
+        """One scheduler cycle. Safe to call from tests and from the thread.
+
+        ``force`` is the manual override: the Owner explicitly asked for a run
+        now, so the peak-hours and runway guards are skipped and the request is
+        billed at the peak rate. Automatic cycles always call with force=False,
+        which is what keeps the scheduler off peak pricing.
+
+        ``only_match_id`` restricts the cycle to a single match, so a manual
+        click never drains unrelated queued work at peak prices.
+        """
         if not self._work_lock.acquire(blocking=False):
             return {"action": "busy", "note": "worker already running"}
         try:
             settings = self.job_store.settings()
             self._last_cycle_at = int(time.time())
-            if not settings.get("auto_review_enabled"):
+            if not settings.get("auto_review_enabled") and not force:
                 self._set_note("auto review is off")
                 self.job_store.set_runtime(next_planned_at=None, worker_note="auto review is off")
                 return {"action": "disabled", "note": "auto review is off"}
 
             holidays = self.holidays()
             now = self.now_provider()
-            if not is_off_peak(now, holidays):
+            if not force and not is_off_peak(now, holidays):
                 resume_at = next_off_peak_start(now, holidays)
                 self._set_note("waiting for off-peak window")
                 self.job_store.set_runtime(
@@ -435,14 +444,26 @@ class DeepSeekReviewWorker:
                 }
 
             runway = off_peak_seconds_remaining(now, holidays)
-            enqueued = self.enqueue_recent_parsed(settings)
-            pending = self.job_store.pending()
+            if only_match_id is None:
+                enqueued = self.enqueue_recent_parsed(settings)
+                pending = self.job_store.pending()
+            else:
+                # Manual single-match run: never auto-enqueue anything else.
+                enqueued = []
+                entry = self.job_store.get(self.job_store.job_id(int(only_match_id)))
+                pending = [entry] if entry and entry.get("status") in {JOB_PENDING, JOB_PAUSED, JOB_RUNNING} else []
+                if entry and entry.get("status") == JOB_DONE:
+                    return {
+                        "action": "already_done",
+                        "note": "这场比赛已经有初步解析了",
+                        "match_id": int(only_match_id),
+                    }
             if not pending:
                 self._set_note("idle; nothing pending")
                 self.job_store.set_runtime(next_planned_at=None, worker_note="idle")
                 return {"action": "idle", "enqueued": enqueued}
 
-            if runway < MIN_RUNWAY_SECONDS:
+            if not force and runway < MIN_RUNWAY_SECONDS:
                 resume_at = next_off_peak_runway(now, MIN_RUNWAY_SECONDS, holidays)
                 self._set_note("off-peak window too short")
                 self.job_store.set_runtime(
@@ -460,12 +481,13 @@ class DeepSeekReviewWorker:
             for job in pending:
                 if self._stop.is_set():
                     break
-                if not is_off_peak(self.now_provider(), holidays):
-                    self.job_store.mark(job["job_id"], JOB_PAUSED, error="paused: peak hours started")
-                    break
-                if off_peak_seconds_remaining(self.now_provider(), holidays) < MIN_RUNWAY_SECONDS:
-                    self.job_store.mark(job["job_id"], JOB_PAUSED, error="paused: off-peak window too short")
-                    break
+                if not force:
+                    if not is_off_peak(self.now_provider(), holidays):
+                        self.job_store.mark(job["job_id"], JOB_PAUSED, error="paused: peak hours started")
+                        break
+                    if off_peak_seconds_remaining(self.now_provider(), holidays) < MIN_RUNWAY_SECONDS:
+                        self.job_store.mark(job["job_id"], JOB_PAUSED, error="paused: off-peak window too short")
+                        break
                 processed.append(self.run_job(job["job_id"]))
 
             self._set_note(f"processed {len(processed)} job(s)")
@@ -473,7 +495,13 @@ class DeepSeekReviewWorker:
                 worker_note=f"processed {len(processed)} job(s)",
                 next_planned_at=None,
             )
-            return {"action": "processed", "enqueued": enqueued, "jobs": processed}
+            result = {"action": "processed", "enqueued": enqueued, "jobs": processed}
+            if force:
+                result["forced"] = True
+                result["billing_warning"] = (
+                    "手动触发已越过错峰保护；若当前为峰时，本次按峰时价计费"
+                )
+            return result
         finally:
             self._work_lock.release()
 
@@ -869,7 +897,7 @@ class DeepSeekReviewWorker:
         return {
             "schema_version": OUTPUT_SCHEMA_VERSION,
             "auto_review_enabled": bool(settings.get("auto_review_enabled")),
-            "batch_size": int(settings.get("batch_size") or 3),
+            "batch_size": int(settings.get("batch_size") or DEFAULT_BATCH_SIZE),
             "model": settings.get("model"),
             "max_output_tokens": settings.get("max_output_tokens"),
             "temperature": settings.get("temperature"),

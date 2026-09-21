@@ -457,6 +457,12 @@ function reviewStateLabel(job, review) {
   return "已排队，等待错峰时段";
 }
 
+// Manual runs ignore the off-peak guard, so they are billed at the peak rate.
+// The label says so before the click, not after.
+function manualRunLabel(running) {
+  return running ? "正在手动解析…" : "立即手动解析";
+}
+
 function ReviewCenter({
   owner, matches, currentMatchId, deepseek, prompts, reviews, jobs, nowSeconds,
   busy, onToggleAuto, onSavePrompt, onActivatePrompt, onLoadPromptFile, onQueue,
@@ -470,7 +476,9 @@ function ReviewCenter({
   const reviewByMatch = new Map((reviews || []).map((review) => [Number(review.match_id), review]));
   const matchById = new Map((matches || []).map((match) => [String(match.id), match]));
   const parsedMatches = matches.filter((match) => match.status === "已解析");
-  const autoScope = parsedMatches.slice(0, Number(status.batch_size) || 3);
+  const scopeSize = Number(status.batch_size) || 5;
+  const autoScope = parsedMatches.slice(0, scopeSize);
+  const beyondScope = parsedMatches.slice(scopeSize);
 
   const nextOffPeakIn = schedule0.off_peak_now
     ? 0
@@ -484,7 +492,7 @@ function ReviewCenter({
       <div className="section-intro">
         <span>DEEPSEEK PRELIMINARY REVIEW</span>
         <h1>初步解析</h1>
-        <p>服务器在 DeepSeek 错峰时段自动跑初步解析，只处理最近 {status.batch_size || 3} 场已解析比赛。错峰费率是峰时的 5 折。</p>
+        <p>服务器在 DeepSeek 错峰时段自动跑初步解析，只处理最近 {status.batch_size || 5} 场已解析比赛。错峰费率是峰时的 5 折。</p>
       </div>
 
       <article className="preliminary-library">
@@ -587,7 +595,7 @@ function ReviewCenter({
                 {status.auto_review_enabled ? "关闭自动复盘" : "开启自动复盘"}
               </button>
               <dl>
-                <div><dt>执行范围</dt><dd>最近 {status.batch_size || 3} 场已解析</dd></div>
+                <div><dt>执行范围</dt><dd>最近 {status.batch_size || 5} 场已解析</dd></div>
                 <div><dt>使用模型</dt><dd>{status.model || "deepseek-flash"}</dd></div>
                 <div><dt>推理强度</dt><dd>{status.reasoning_effort || "high"}</dd></div>
                 <div><dt>API Key</dt><dd className={status.deepseek_key_configured ? "ok" : "warn"}>
@@ -692,8 +700,8 @@ function ReviewCenter({
 
       <article className="preliminary-queue">
         <header>
-          <div><Database size={19} weight="fill" /><h2>自动复盘范围（最近 {status.batch_size || 3} 场已解析）</h2></div>
-          <small>超出这个范围的比赛不会被自动解析，需要手动单场排队。</small>
+          <div><Database size={19} weight="fill" /><h2>自动复盘范围（最近 {scopeSize} 场已解析）</h2></div>
+          <small>前 {scopeSize} 场由服务器在错峰时段自动解析；更早的比赛请手动触发。</small>
         </header>
         {autoScope.length ? (
           <div className="queue-rows">
@@ -724,9 +732,23 @@ function ReviewCenter({
                         <a href={review.json.download_url}><DownloadSimple size={15} />下载游戏解析</a>
                       </>
                     ) : owner ? (
-                      <button onClick={() => onQueue(match.id)} disabled={busy}>
-                        <Flame size={15} />单场排队
-                      </button>
+                      <>
+                        <button
+                          onClick={() => onQueue(match.id, false)}
+                          disabled={busy}
+                          title="只排队，等下一个错峰窗口执行（5 折）"
+                        >
+                          <ClockCounterClockwise size={15} />排到错峰
+                        </button>
+                        <button
+                          className="force-run"
+                          onClick={() => onQueue(match.id, true)}
+                          disabled={busy}
+                          title="立刻执行，不等待错峰窗口；峰时按全价计费"
+                        >
+                          <Flame size={15} />{manualRunLabel(busy)}
+                        </button>
+                      </>
                     ) : (
                       <small className="muted">尚未生成</small>
                     )}
@@ -740,6 +762,63 @@ function ReviewCenter({
             <FileMagnifyingGlass size={24} />
             <span><strong>还没有已解析比赛</strong><small>比赛解析完成后才会自动进入初步解析队列。</small></span>
           </div>
+        )}
+        {beyondScope.length > 0 && (
+          <>
+            <div className="queue-divider">
+              <span>以下 {beyondScope.length} 场已解析，但超出自动范围</span>
+              <small>服务器不会自动解析它们；需要时点「立即手动解析」。</small>
+            </div>
+            <div className="queue-rows">
+              {beyondScope.map((match) => {
+                const job = jobByMatch.get(Number(match.id));
+                const review = reviewByMatch.get(Number(match.id));
+                return (
+                  <div className="queue-row out-of-scope" key={match.id}>
+                    <img src={match.image} alt={`${match.heroZh}英雄头像`} />
+                    <span><strong>{match.id}</strong><small>{match.heroZh} · {match.result} · {match.duration}</small></span>
+                    <em
+                      className={review ? "done" : job?.status === "failed" ? "failed" : "waiting"}
+                      title={job?.last_error || ""}
+                    >
+                      {reviewStateLabel(job, review)}
+                    </em>
+                    <span className="queue-actions">
+                      {review ? (
+                        <>
+                          <a href={review.markdown.preview_url} target="_blank" rel="noreferrer">
+                            <FileMagnifyingGlass size={15} />预览复盘
+                          </a>
+                          <a href={review.markdown.download_url}><DownloadSimple size={15} />下载初步复盘</a>
+                          <a href={review.json.download_url}><DownloadSimple size={15} />下载游戏解析</a>
+                        </>
+                      ) : owner ? (
+                        <>
+                          <button
+                            onClick={() => onQueue(match.id, false)}
+                            disabled={busy}
+                            title="只排队，等下一个错峰窗口执行（5 折）"
+                          >
+                            <ClockCounterClockwise size={15} />排到错峰
+                          </button>
+                          <button
+                            className="force-run"
+                            onClick={() => onQueue(match.id, true)}
+                            disabled={busy}
+                            title="立刻执行，不等待错峰窗口；峰时按全价计费"
+                          >
+                            <Flame size={15} />{manualRunLabel(busy)}
+                          </button>
+                        </>
+                      ) : (
+                        <small className="muted">尚未生成</small>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </article>
 
@@ -901,12 +980,15 @@ function App() {
 
   useEffect(() => {
     if (view !== "preliminary") return undefined;
+    // Poll faster while something is actually running, so a manual trigger
+    // shows progress without the user refreshing.
+    const running = (deepseek?.jobs || []).some((job) => job.status === "running");
     const timer = window.setInterval(() => {
       loadDeepseek();
       loadPreliminary();
-    }, 60000);
+    }, running ? 8000 : 60000);
     return () => window.clearInterval(timer);
-  }, [view]);
+  }, [view, deepseek]);
 
   const preliminaryAction = async (work, successMessage) => {
     setPreliminaryBusy(true);
@@ -972,20 +1054,22 @@ function App() {
     }
   };
 
-  const queuePreliminary = (id) => preliminaryAction(async () => {
+  const queuePreliminary = (id, runNow = false) => preliminaryAction(async () => {
     const response = await fetch("/dota2/api/v1/deepseek/preliminary-reviews", {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ match_id: Number(id) }),
+      body: JSON.stringify({ match_id: Number(id), run_now: Boolean(runNow) }),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "排队失败");
     return data;
-  }, `比赛 ${id} 已排队，将在错峰时段解析`);
+  }, runNow
+    ? `比赛 ${id} 已开始手动解析，通常几分钟内完成`
+    : `比赛 ${id} 已排队，将在错峰时段解析`);
 
   const runPreliminaryCycle = () => preliminaryAction(async () => {
-    const response = await fetch("/dota2/api/v1/deepseek/run-now", {
+    const response = await fetch("/dota2/api/v1/deepseek/run-now?force=true", {
       method: "POST",
       credentials: "same-origin",
     });

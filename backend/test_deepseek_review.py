@@ -200,11 +200,11 @@ class ReviewJobStoreTest(unittest.TestCase):
     def test_default_settings_keep_auto_review_off(self):
         settings = self.store.settings()
         self.assertFalse(settings["auto_review_enabled"])
-        self.assertEqual(settings["batch_size"], 3)
+        self.assertEqual(settings["batch_size"], 5)
 
-    def test_batch_size_default_is_three_recent_matches(self):
-        updated = self.store.update_settings({"batch_size": 3})
-        self.assertEqual(updated["batch_size"], 3)
+    def test_batch_size_default_covers_five_recent_matches(self):
+        updated = self.store.update_settings({"batch_size": 5})
+        self.assertEqual(updated["batch_size"], 5)
 
     def test_upsert_is_idempotent_for_a_finished_job(self):
         job, created = self.store.upsert_job(9001, "b9001", 1, "deepseek-flash")

@@ -196,6 +196,7 @@ class DeepSeekPromptActivateBody(BaseModel):
 class PreliminaryReviewBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     match_id: int = Field(gt=0)
+    run_now: bool = False
 
 
 def load_json(path, default):
@@ -1450,8 +1451,14 @@ def activate_deepseek_prompt(body: DeepSeekPromptActivateBody, request: Request)
 
 @app.post("/v1/deepseek/preliminary-reviews")
 def enqueue_preliminary_review(body: PreliminaryReviewBody, request: Request):
-    reject_cross_origin(request)
-    require_owner(request)
+    # Two channels: the Owner browser, or an authorized terminal holding the
+    # review:enqueue scope. Bearer callers are not cross-origin browser traffic,
+    # so the cookie CSRF guard does not apply to them.
+    if request.headers.get("authorization"):
+        resolve_read_access(request, SCOPE_REVIEW_ENQUEUE)
+    else:
+        reject_cross_origin(request)
+        require_owner(request)
     item = owned(body.match_id)
     if not item.get("parsed") and not cache_path(body.match_id).is_file():
         raise HTTPException(409, "该比赛还没有解析数据，无法排队初步解析")
@@ -1467,12 +1474,27 @@ def enqueue_preliminary_review(body: PreliminaryReviewBody, request: Request):
         model=settings.get("model"),
         priority=10,
     )
+    queued_for_immediate_run = False
+    if body.run_now:
+        # Run only this match, on a worker thread. A DeepSeek call can take
+        # minutes, which would exceed the reverse proxy read timeout and show a
+        # 504 even though the job succeeded, so the request returns at once and
+        # the page polls job status.
+        PROFILE_REFRESH_EXECUTOR.submit(
+            DEEPSEEK_WORKER.tick, True, int(body.match_id)
+        )
+        queued_for_immediate_run = True
     return JSONResponse(
         {
-            "job": job,
+            "job": DEEPSEEK_JOBS.get(job["job_id"]) or job,
             "created": created,
+            "queued_for_immediate_run": queued_for_immediate_run,
             "schedule": DEEPSEEK_WORKER.schedule(),
-            "note": "初步解析只会在 DeepSeek 错峰时段执行，以享受 5 折费率。",
+            "note": (
+                "已在后台立即触发这一场；若当前为峰时，本次按峰时价计费。"
+                if body.run_now
+                else "初步解析只会在 DeepSeek 错峰时段执行，以享受 5 折费率。"
+            ),
         },
         status_code=201 if created else 200,
         headers={"Cache-Control": "no-store"},
@@ -1616,11 +1638,23 @@ def preview_preliminary_review_markdown(match_id: int, request: Request):
 
 
 @app.post("/v1/deepseek/run-now")
-def run_deepseek_cycle(request: Request):
+def run_deepseek_cycle(
+    request: Request,
+    force: bool = Query(False),
+    match_id: int | None = Query(None, gt=0),
+):
+    """Advance the scheduler. `force=true` is the manual override.
+
+    Manual runs skip the peak-hours guard so the Owner can trigger a review on
+    demand; that request is billed at the peak rate. Automatic cycles never
+    force, which is what keeps unattended runs on off-peak pricing.
+    """
     reject_cross_origin(request)
     require_owner(request)
+    if match_id is not None:
+        owned(match_id)
     return JSONResponse(
-        DEEPSEEK_WORKER.tick(),
+        DEEPSEEK_WORKER.tick(force=force, only_match_id=match_id),
         headers={"Cache-Control": "no-store"},
     )
 
