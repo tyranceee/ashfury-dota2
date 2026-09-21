@@ -82,11 +82,15 @@ function normalizeMatch(match) {
 
 function parseStateLabel(status, parsed) {
   if (parsed || status === "parsed") return "已解析";
+  // The API keeps *why* a match is not parsed yet, so a stalled queue is visible.
   if (status === "waiting_local") return "等待本地解析";
+  if (status === "queued") return "解析排队中";
+  if (status === "waiting_opendota") return "等待 OpenDota";
+  if (status === "unavailable" || status === "failed") return "解析失败";
+  // Raw index values still decode correctly if they ever reach the client.
   if (status === "requested") return "解析排队中";
   if (status === "waiting") return "等待 OpenDota";
-  if (status === "unavailable") return "解析失败";
-  if (status === "failed") return "解析失败";
+  if (status === "parsing") return "解析中";
   return "等待解析";
 }
 

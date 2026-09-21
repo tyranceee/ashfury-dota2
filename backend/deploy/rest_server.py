@@ -958,16 +958,39 @@ async def store_artifact(request, destination):
 
 
 def unified_parse_state(item):
+    """Public parse state, preserving *why* a match is not parsed yet.
+
+    Collapsing "requested" and "waiting" into a single "parsing" value hid the
+    difference between a request submitted seconds ago and one queued for
+    hours, which made a stalled OpenDota parse look like normal progress.
+    """
     if item.get("parsed"):
         return "parsed"
     status = item.get("parse_status")
     if status == "waiting_local":
-        return "waiting"
-    if status in {"requested", "waiting"}:
-        return "parsing"
+        # Still inside the DotaReplayDesk upload window.
+        return "waiting_local"
+    if status == "requested":
+        return "queued"
+    if status == "waiting":
+        return "waiting_opendota"
     if status == "unavailable":
         return "failed"
     return "unparsed"
+
+
+PARSE_STATE_LABELS_ZH = {
+    "parsed": "已解析",
+    "waiting_local": "等待本地解析（DotaReplayDesk 上传窗口内）",
+    "queued": "解析排队中（已提交 OpenDota）",
+    "waiting_opendota": "等待 OpenDota 完成解析",
+    "failed": "解析失败",
+    "unparsed": "尚未请求解析",
+}
+
+
+def parse_state_label(state):
+    return PARSE_STATE_LABELS_ZH.get(state, state)
 
 
 def participant_summary(player):
@@ -1976,7 +1999,7 @@ def match_page(match_id: int):
     return page(
         f"Match {match_id}",
         f"<h1>Match {match_id}</h1>"
-        f"<div class='box'>状态：{html.escape(state)}。页面访问不会提交解析请求。</div>",
+        f"<div class='box'>状态：{html.escape(parse_state_label(state))}。页面访问不会提交解析请求。</div>",
     )
 
 
