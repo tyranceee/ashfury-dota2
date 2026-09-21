@@ -16,6 +16,10 @@ artifact-upload-token
 review-signing-secret
 slack-bot-token
 refresh-token
+# DeepSeek credentials and search-provider credentials
+deepseek-api-key
+*api-key*
+search-api-key
 
 # Runtime databases, caches, match data, and uploaded artifacts
 *.sqlite
@@ -27,6 +31,13 @@ artifacts/
 history_profiles_v01/
 history_match_roles/
 test_results/
+# Authorized-terminal credentials and audit trail
+terminal-download-tokens.json
+terminal-access-audit.ndjson
+# Preliminary-review queue, prompt store, and generated artifacts
+deepseek-review-jobs.json
+deepseek-review-prompt.json
+preliminary_reviews/
 
 # Logs and temporary files
 *.log
