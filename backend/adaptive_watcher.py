@@ -21,6 +21,21 @@ OFFLINE_RESULT_INTERVAL = int(os.environ.get(
 ))
 PARSE_CHECK_INTERVAL = int(os.environ.get("PARSE_CHECK_SECONDS", "600"))
 LOCAL_PARSE_GRACE_SECONDS = int(os.environ.get("LOCAL_PARSE_GRACE_SECONDS", "3600"))
+# OpenDota occasionally drops a queued parse job: the job id disappears from
+# /request/<id> and the match never gets 'version', so an entry that is trusted
+# to be "requested once, forever" would stay unparsed permanently. After this
+# long without progress the request is re-submitted, at most this many times.
+STALE_PARSE_REQUEST_SECONDS = int(
+    os.environ.get("STALE_PARSE_REQUEST_SECONDS", "5400")
+)
+MAX_PARSE_REQUEST_ATTEMPTS = int(os.environ.get("MAX_PARSE_REQUEST_ATTEMPTS", "3"))
+# Entries that were never registered by the monitor (no parse_discovered_at, so
+# their status stayed "unknown") are also eligible once their match data is
+# older than the grace window.
+UNREGISTERED_PARSE_GRACE_SECONDS = int(
+    os.environ.get("UNREGISTERED_PARSE_GRACE_SECONDS", "1800")
+)
+PENDING_PARSE_UNKNOWN_STATUSES = {"unknown", "unavailable"}
 
 BASE_DIR = Path(os.environ.get("DOTA_BASE_DIR", "/opt/dota2-mcp"))
 STATE_FILE = BASE_DIR / "adaptive_monitor_state.json"
@@ -176,6 +191,10 @@ class OpenDotaClient(object):
     def request_parse(self, match_id):
         return self._request("POST", "/request/{}".format(match_id))
 
+    def parse_job(self, match_id):
+        """Current OpenDota parse job for a match, or None once it is gone."""
+        return self._request("GET", "/request/{}".format(match_id))
+
 
 class SteamPresenceClient(object):
     def __init__(self, api_key, client=None):
@@ -306,16 +325,37 @@ class AdaptiveWatcher(object):
 
     def check_pending_parse(self):
         index = load_json(INDEX_FILE, {})
-        pending = sorted(
-            [
-                item for item in index.values()
-                if not item.get("parsed")
-                and item.get("parse_status")
-                in {"waiting_local", "requested", "waiting", "unavailable"}
-            ],
-            key=lambda item: item.get("start_time", 0),
-            reverse=True,
-        )[:3]
+        now = int(self.clock())
+        stale_cutoff = now - STALE_PARSE_REQUEST_SECONDS
+
+        def pending_key(item):
+            """Stale or never-registered entries jump the queue."""
+            requested_at = int(item.get("parse_requested_at") or 0)
+            if item.get("parse_requested") and requested_at and requested_at < stale_cutoff:
+                return 0
+            if not item.get("parse_discovered_at"):
+                return 1
+            return 2
+
+        candidates = [
+            item for item in index.values()
+            if not item.get("parsed")
+            and (
+                item.get("parse_status")
+                in {"waiting_local", "requested", "waiting"}
+                or (
+                    item.get("parse_status") in PENDING_PARSE_UNKNOWN_STATUSES
+                    and not item.get("parse_discovered_at")
+                    and now - int(item.get("start_time") or now)
+                    >= UNREGISTERED_PARSE_GRACE_SECONDS
+                )
+            )
+        ]
+        candidates.sort(
+            key=lambda item: (pending_key(item), -int(item.get("start_time") or 0))
+        )
+        pending = candidates[:3]
+
         changed = False
         for entry in pending:
             match_id = entry["match_id"]
@@ -340,6 +380,11 @@ class AdaptiveWatcher(object):
             ):
                 entry["parse_status"] = "waiting_local"
                 entry["last_parse_check"] = now
+                # Without this, the grace window restarts from zero on every
+                # pass for entries the monitor never registered, and they would
+                # never become eligible.
+                if not entry.get("parse_discovered_at"):
+                    entry["parse_discovered_at"] = now
                 changed = True
                 continue
 
@@ -354,15 +399,59 @@ class AdaptiveWatcher(object):
                 log("{} 解析完成并缓存".format(match_id))
                 continue
 
-            if not entry.get("parse_requested"):
+            requested_at = int(entry.get("parse_requested_at") or 0)
+            attempts = int(entry.get("parse_request_attempts") or 0)
+            is_stale = bool(
+                entry.get("parse_requested")
+                and requested_at
+                and now - requested_at >= STALE_PARSE_REQUEST_SECONDS
+            )
+
+            if is_stale and attempts >= MAX_PARSE_REQUEST_ATTEMPTS:
+                entry["parse_status"] = "unavailable"
+                entry["parse_last_error"] = (
+                    "OpenDota 已提交 {} 次仍未完成解析，超出重试上限".format(attempts)
+                )
+                entry["last_parse_check"] = now
+                changed = True
+                log("{} 超出解析重试上限（{} 次），标记 unavailable".format(
+                    match_id, attempts
+                ))
+                continue
+
+            if not entry.get("parse_requested") or is_stale:
+                job_state = None
+                if is_stale:
+                    # OpenDota answers null once the queued job is gone, which is
+                    # exactly the case this retry exists for.
+                    try:
+                        job_state = self.opendota.parse_job(match_id)
+                    except Exception as error:
+                        log("{} 解析任务查询失败：{}".format(match_id, error))
+
                 result = self.opendota.request_parse(match_id)
                 entry["parse_requested"] = True
                 entry["parse_requested_at"] = now
                 entry["parse_job_id"] = extract_job_id(result)
+                entry["parse_request_attempts"] = attempts + 1
+                entry["parse_discovered_at"] = entry.get("parse_discovered_at") or now
                 entry["parse_status"] = "requested"
-                log("{} 已提交唯一一次 OpenDota 解析请求，job={}".format(
-                    match_id, entry.get("parse_job_id")
-                ))
+                entry.pop("parse_last_error", None)
+                if is_stale:
+                    log(
+                        "{} 解析请求已过期 {} 分钟，OpenDota 任务状态={}，"
+                        "第 {} 次重新提交，job={}".format(
+                            match_id,
+                            (now - requested_at) // 60,
+                            "已丢失" if not job_state else job_state,
+                            attempts + 1,
+                            entry.get("parse_job_id"),
+                        )
+                    )
+                else:
+                    log("{} 已提交 OpenDota 解析请求，job={}".format(
+                        match_id, entry.get("parse_job_id")
+                    ))
             else:
                 entry["parse_status"] = "waiting"
                 log("{} OpenDota 仍在解析，10 分钟后再同步".format(match_id))

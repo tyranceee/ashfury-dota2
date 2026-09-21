@@ -305,8 +305,11 @@ class DeepSeekHostedSearchTest(SearchTestBase):
         self.assertEqual(outcome.provider_id, PROVIDER_DEEPSEEK_HOSTED)
 
     def test_costs_use_the_official_cny_table_and_count_search_requests(self):
+        import datetime as dt
         FakeHttpx.payloads["post"] = ANTHROPIC_REPLY
-        outcome = deepseek_hosted_search(EXECUTED_QUERY, self.config)
+        # Pin the instant: the billing window must not depend on wall-clock time.
+        off_peak = int(dt.datetime(2026, 9, 21, 20, tzinfo=dt.timezone.utc).timestamp())
+        outcome = deepseek_hosted_search(EXECUTED_QUERY, self.config, now=off_peak)
         cost = outcome.cost
         self.assertEqual(cost["currency"], "CNY")
         self.assertEqual(cost["web_search_requests"], 1)

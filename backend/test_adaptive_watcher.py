@@ -229,6 +229,7 @@ class AdaptiveWatcherTests(unittest.TestCase):
         self.assertEqual(opendota.parse_calls, 0)
 
     def test_submitted_parse_request_is_never_submitted_twice(self):
+        """A request that is still fresh is left alone (original policy)."""
         now = [100000]
         module.save_json_atomic(module.INDEX_FILE, {
             "101": {
@@ -238,7 +239,7 @@ class AdaptiveWatcherTests(unittest.TestCase):
                 "parse_status": "requested",
                 "parse_discovered_at": 1,
                 "parse_requested": True,
-                "parse_requested_at": 10,
+                "parse_requested_at": now[0] - 600,
             }
         })
 
@@ -247,13 +248,17 @@ class AdaptiveWatcherTests(unittest.TestCase):
                 return False
 
         class OpenDota(object):
-            parse_calls = 0
+            def __init__(self):
+                self.parse_calls = 0
 
             def match(self, match_id):
                 return {"players": []}
 
             def request_parse(self, match_id):
                 self.parse_calls += 1
+                return {"jobId": 99}
+
+            def parse_job(self, match_id):
                 return {"jobId": 99}
 
         opendota = OpenDota()
@@ -265,6 +270,171 @@ class AdaptiveWatcherTests(unittest.TestCase):
         self.assertEqual(opendota.parse_calls, 0)
         index = module.load_json(module.INDEX_FILE, {})
         self.assertEqual(index["101"]["parse_status"], "waiting")
+        self.assertNotIn("parse_request_attempts", index["101"])
+
+    def test_stale_parse_request_is_resubmitted(self):
+        """Regression: a parse job that vanishes from OpenDota must be retried.
+
+        Match 9008030503 sat in 'waiting' for over 11 hours because the queued
+        job id had disappeared (GET /request/<id> returns null) while the entry
+        was trusted to have been "requested once, forever".
+        """
+        now = [100000]
+        module.save_json_atomic(module.INDEX_FILE, {
+            "9008030503": {
+                "match_id": 9008030503,
+                "start_time": 1,
+                "parsed": False,
+                "parse_status": "waiting",
+                "parse_discovered_at": 1,
+                "parse_requested": True,
+                "parse_requested_at": now[0] - module.STALE_PARSE_REQUEST_SECONDS - 60,
+                "parse_job_id": 537301221,
+            }
+        })
+
+        class Presence(object):
+            def is_dota_online(self):
+                return False
+
+        class OpenDota(object):
+            def __init__(self):
+                self.parse_calls = 0
+                self.job_queries = 0
+
+            def match(self, match_id):
+                return {"players": []}  # players but no version -> still unparsed
+
+            def parse_job(self, match_id):
+                self.job_queries += 1
+                return None  # the queued job is gone
+
+            def request_parse(self, match_id):
+                self.parse_calls += 1
+                return {"job": {"jobId": 538454392}}
+
+        opendota = OpenDota()
+        watcher = module.AdaptiveWatcher(Presence(), opendota, clock=lambda: now[0])
+        watcher.check_pending_parse()
+
+        self.assertEqual(opendota.parse_calls, 1)
+        self.assertEqual(opendota.job_queries, 1)
+        entry = module.load_json(module.INDEX_FILE, {})["9008030503"]
+        self.assertEqual(entry["parse_status"], "requested")
+        self.assertEqual(entry["parse_job_id"], 538454392)
+        self.assertEqual(entry["parse_request_attempts"], 1)
+        self.assertEqual(entry["parse_requested_at"], now[0])
+
+    def test_stale_parse_request_stops_after_the_attempt_cap(self):
+        now = [100000]
+        module.save_json_atomic(module.INDEX_FILE, {
+            "9008030503": {
+                "match_id": 9008030503,
+                "start_time": 1,
+                "parsed": False,
+                "parse_status": "waiting",
+                "parse_discovered_at": 1,
+                "parse_requested": True,
+                "parse_requested_at": now[0] - module.STALE_PARSE_REQUEST_SECONDS - 60,
+                "parse_request_attempts": module.MAX_PARSE_REQUEST_ATTEMPTS,
+            }
+        })
+
+        class Presence(object):
+            def is_dota_online(self):
+                return False
+
+        class OpenDota(object):
+            def __init__(self):
+                self.parse_calls = 0
+
+            def match(self, match_id):
+                return {"players": []}
+
+            def request_parse(self, match_id):
+                self.parse_calls += 1
+                return {"jobId": 1}
+
+        opendota = OpenDota()
+        watcher = module.AdaptiveWatcher(Presence(), opendota, clock=lambda: now[0])
+        watcher.check_pending_parse()
+
+        self.assertEqual(opendota.parse_calls, 0)
+        entry = module.load_json(module.INDEX_FILE, {})["9008030503"]
+        self.assertEqual(entry["parse_status"], "unavailable")
+        self.assertIn("重试上限", entry["parse_last_error"])
+
+    def test_unregistered_entries_become_eligible_after_the_grace_window(self):
+        """Matches that predate this monitor used to stay stuck at 'unknown'."""
+        now = [100000]
+        module.save_json_atomic(module.INDEX_FILE, {
+            "9006516834": {
+                "match_id": 9006516834,
+                "start_time": now[0] - module.UNREGISTERED_PARSE_GRACE_SECONDS - 60,
+                "parsed": False,
+                "parse_status": "unknown",
+            }
+        })
+
+        class Presence(object):
+            def is_dota_online(self):
+                return False
+
+        class OpenDota(object):
+            def __init__(self):
+                self.parse_calls = 0
+
+            def match(self, match_id):
+                return {"players": []}
+
+            def request_parse(self, match_id):
+                self.parse_calls += 1
+                return {"jobId": 777}
+
+        opendota = OpenDota()
+        watcher = module.AdaptiveWatcher(Presence(), opendota, clock=lambda: now[0])
+        # The watcher seeds a baseline for unregistered entries, so they first
+        # pass through the normal local-parse grace window, then get requested.
+        watcher.check_pending_parse()
+        self.assertEqual(opendota.parse_calls, 0)
+        now[0] += module.LOCAL_PARSE_GRACE_SECONDS + 1
+        watcher.check_pending_parse()
+
+        self.assertEqual(opendota.parse_calls, 1)
+        entry = module.load_json(module.INDEX_FILE, {})["9006516834"]
+        self.assertEqual(entry["parse_status"], "requested")
+        self.assertEqual(entry["parse_job_id"], 777)
+
+    def test_recent_unknown_entries_are_left_alone(self):
+        now = [100000]
+        module.save_json_atomic(module.INDEX_FILE, {
+            "9006516834": {
+                "match_id": 9006516834,
+                "start_time": now[0] - 60,
+                "parsed": False,
+                "parse_status": "unknown",
+            }
+        })
+
+        class Presence(object):
+            def is_dota_online(self):
+                return False
+
+        class OpenDota(object):
+            def __init__(self):
+                self.parse_calls = 0
+
+            def match(self, match_id):
+                return {"players": []}
+
+            def request_parse(self, match_id):
+                self.parse_calls += 1
+                return {"jobId": 777}
+
+        opendota = OpenDota()
+        watcher = module.AdaptiveWatcher(Presence(), opendota, clock=lambda: now[0])
+        watcher.check_pending_parse()
+        self.assertEqual(opendota.parse_calls, 0)
 
     def test_parse_result_sync_interval_is_ten_minutes(self):
         self.assertEqual(module.PARSE_CHECK_INTERVAL, 600)

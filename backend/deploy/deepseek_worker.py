@@ -612,7 +612,7 @@ class DeepSeekReviewWorker:
         )
 
         self.job_store.mark(job_id, JOB_RUNNING, increment_attempts=True)
-        started_at = int(time.time())
+        started_at = int(self.now_provider())
         search_config = search_provider_config()
         search_on = bool(settings.get("enable_web_search"))
         search_ready, search_reason = search_available(search_config) if search_on else (False, "disabled")
@@ -703,7 +703,7 @@ class DeepSeekReviewWorker:
             LOGGER.warning("Preliminary review needs a retry: %s", detail)
             return {"job_id": job_id, "status": "retry_scheduled", "error": detail}
 
-        finished_at = int(time.time())
+        finished_at = int(self.now_provider())
         cost = estimate_cost(result["usage"], off_peak=is_off_peak(started_at, self.holidays()))
         # Hosted search is billed on top of the review completion, so the job
         # cost carries both lines.

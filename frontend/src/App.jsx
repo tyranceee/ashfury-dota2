@@ -75,11 +75,19 @@ function normalizeMatch(match) {
     image: match.hero_image || match.image || localHeroAssets[heroId] || asset("visage"),
     kda: String(match.kda || "—").replaceAll("/", " / "),
     duration: match.duration || "—",
-    status: match.parse_status === "parsed" || match.parsed
-      ? "已解析"
-      : match.parse_status === "parsing" ? "解析中" : "等待解析",
+    status: parseStateLabel(match.parse_status, match.parsed),
     review: reviewIds.has(id) ? "可查看" : "待生成",
   };
+}
+
+function parseStateLabel(status, parsed) {
+  if (parsed || status === "parsed") return "已解析";
+  if (status === "waiting_local") return "等待本地解析";
+  if (status === "requested") return "解析排队中";
+  if (status === "waiting") return "等待 OpenDota";
+  if (status === "unavailable") return "解析失败";
+  if (status === "failed") return "解析失败";
+  return "等待解析";
 }
 
 function formatMatchDate(timestamp) {
@@ -279,7 +287,7 @@ function HistoricalArchive({ profiles, benchmark, loading, error, status, onOpen
 }
 
 function MatchHeader({ match, workspace, monitor, owner, onReview, submitting, matches, onSelect }) {
-  const parseState = workspace?.parse?.status === "parsed" ? "解析完成" : workspace?.parse?.status === "parsing" ? "解析中" : "等待解析";
+  const parseState = parseStateLabel(workspace?.parse?.status, workspace?.parse?.status === "parsed");
   return (
     <section className="match-identity">
       <div className="match-number"><Archive size={28} /><div><span>比赛编号</span><strong>{match.id}</strong><small>{formatMatchDate(match.startTime)} · 天梯匹配</small></div></div>
@@ -414,7 +422,7 @@ function DataView({ workspace, inventory, monitor }) {
   const parse = workspace?.parse || {};
   const files = Array.isArray(inventory?.artifacts) ? inventory.artifacts : [];
   const source = parse.source === "dota_replay_desk" ? "DotaReplayDesk" : parse.source === "opendota" ? "OpenDota" : "尚未取得";
-  const status = parse.status === "parsed" ? "已解析" : parse.status === "parsing" ? "解析中" : parse.status === "failed" ? "解析失败" : "等待解析";
+  const status = parseStateLabel(parse.status, parse.status === "parsed");
   return <section className="data-center"><div className="section-intro"><span>DATA PROVENANCE</span><h1>数据中心</h1><p>统一展示比赛基础数据、唯一解析结果和 DotaReplayDesk 附件。</p></div><div className="data-grid"><article><h2>当前比赛状态</h2><dl><div><dt>比赛 ID</dt><dd>{workspace?.match?.match_id || "—"}</dd></div><div><dt>统一解析状态</dt><dd>{status}</dd></div><div><dt>结果来源</dt><dd>{source}</dd></div><div><dt>历史画像</dt><dd>{workspace?.historical_profile?.status === "ready" ? "已缓存" : "按需计算"}</dd></div><div><dt>在线检测策略</dt><dd>{monitor?.dota_online ? "每10秒" : "每10分钟"}</dd></div></dl>{parse.result_url && <a className="data-link" href={parse.result_url} target="_blank" rel="noreferrer"><FileText size={17} />打开统一解析 JSON<ArrowSquareOut size={14} /></a>}</article><article><h2>本地解析附件</h2>{files.length ? <div className="artifact-list">{files.map((file) => <a key={file.type} href={file.url} target="_blank" rel="noreferrer"><FileText size={18} /><span><strong>{file.label || artifactLabels[file.type] || file.type}</strong><small>{file.filename || file.type}</small></span><DownloadSimple size={17} /></a>)}</div> : <div className="artifact-empty"><FileMagnifyingGlass size={25} /><span><strong>暂无本地附件</strong><small>DotaReplayDesk 上传后才会出现，不生成无效链接。</small></span></div>}<div className="privacy-note"><ShieldCheck size={18} />附件可能包含玩家标识或游戏内聊天，链接公开可读。</div></article></div></section>;
 }
 
