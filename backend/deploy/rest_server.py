@@ -1146,7 +1146,7 @@ def monitor_status():
         "last_processed_match_id": state.get("last_processed_match_id"),
         "last_discovered_match_id": state.get("last_discovered_match_id"),
         "presence_poll_seconds": 600,
-        "online_result_poll_seconds": 10,
+        "online_result_poll_seconds": 60,
         "offline_result_poll_seconds": 600,
         "parse_on_new_match": False,
         "local_parse_grace_seconds": 3600,

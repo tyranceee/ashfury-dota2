@@ -103,7 +103,7 @@ class AdaptiveWatcherTests(unittest.TestCase):
         self.assertEqual(presence.calls, 2)
         self.assertEqual(opendota.latest_calls, 2)
 
-    def test_online_checks_latest_match_every_ten_seconds(self):
+    def test_online_checks_latest_match_every_poll_interval(self):
         class Presence(object):
             calls = 0
 
@@ -123,9 +123,9 @@ class AdaptiveWatcherTests(unittest.TestCase):
         opendota = OpenDota()
         watcher = module.AdaptiveWatcher(presence, opendota, clock=lambda: now[0])
         watcher.run_due()
-        now[0] = 9
+        now[0] = module.RESULT_INTERVAL - 1
         watcher.run_due()
-        now[0] = 10
+        now[0] = module.RESULT_INTERVAL
         watcher.run_due()
 
         self.assertEqual(presence.calls, 1)
@@ -170,16 +170,26 @@ class AdaptiveWatcherTests(unittest.TestCase):
         opendota = OpenDota()
         watcher = module.AdaptiveWatcher(Presence(), opendota, clock=lambda: now[0])
         watcher.run_due()
-        now[0] = 10
+        now[0] = module.RESULT_INTERVAL
         watcher.run_due()
-        now[0] = 20
+        now[0] = module.RESULT_INTERVAL * 2
         watcher.run_due()
 
         self.assertEqual(opendota.parse_calls, 0)
         index = module.load_json(module.INDEX_FILE, {})
         self.assertEqual(index["101"]["parse_status"], "waiting_local")
 
-        now[0] = 3610
+        # The one-hour grace window starts when the match is detected, which is
+        # the last polling cycle above, not time zero.
+        discovered_at = int(
+            module.load_json(module.INDEX_FILE, {})["101"]["parse_discovered_at"]
+        )
+
+        now[0] = discovered_at + module.LOCAL_PARSE_GRACE_SECONDS - 1
+        watcher.check_pending_parse()
+        self.assertEqual(opendota.parse_calls, 0, "宽限期内不应提交 OpenDota 解析")
+
+        now[0] = discovered_at + module.LOCAL_PARSE_GRACE_SECONDS
         watcher.check_pending_parse()
         self.assertEqual(opendota.parse_calls, 1)
         index = module.load_json(module.INDEX_FILE, {})

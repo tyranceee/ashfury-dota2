@@ -307,7 +307,7 @@ function MatchHeader({ match, workspace, monitor, owner, onReview, submitting, m
       <div className="match-actions">
         <label><span>切换比赛</span><select value={match.id} onChange={(event) => onSelect(event.target.value)}>{matches.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select></label>
         {owner && <button className="deep-review" onClick={onReview} disabled={submitting} title="为当前比赛创建一条深度复盘任务"><Flame size={18} weight="fill" />{submitting ? "正在创建任务…" : "发动深度复盘"}<ArrowRight size={17} /></button>}
-        <div className={`monitor-state ${monitor?.dota_online ? "online" : "offline"}`}><i />{monitor?.dota_online ? "Dota 在线 · 10秒检测" : "Dota 离线 · 10分钟检测"}</div>
+        <div className={`monitor-state ${monitor?.dota_online ? "online" : "offline"}`}><i />{monitor?.dota_online ? "Dota 在线 · 1分钟检测" : "Dota 离线 · 10分钟检测"}</div>
       </div>
     </section>
   );
@@ -427,7 +427,7 @@ function DataView({ workspace, inventory, monitor }) {
   const files = Array.isArray(inventory?.artifacts) ? inventory.artifacts : [];
   const source = parse.source === "dota_replay_desk" ? "DotaReplayDesk" : parse.source === "opendota" ? "OpenDota" : "尚未取得";
   const status = parseStateLabel(parse.status, parse.status === "parsed");
-  return <section className="data-center"><div className="section-intro"><span>DATA PROVENANCE</span><h1>数据中心</h1><p>统一展示比赛基础数据、唯一解析结果和 DotaReplayDesk 附件。</p></div><div className="data-grid"><article><h2>当前比赛状态</h2><dl><div><dt>比赛 ID</dt><dd>{workspace?.match?.match_id || "—"}</dd></div><div><dt>统一解析状态</dt><dd>{status}</dd></div><div><dt>结果来源</dt><dd>{source}</dd></div><div><dt>历史画像</dt><dd>{workspace?.historical_profile?.status === "ready" ? "已缓存" : "按需计算"}</dd></div><div><dt>在线检测策略</dt><dd>{monitor?.dota_online ? "每10秒" : "每10分钟"}</dd></div></dl>{parse.result_url && <a className="data-link" href={parse.result_url} target="_blank" rel="noreferrer"><FileText size={17} />打开统一解析 JSON<ArrowSquareOut size={14} /></a>}</article><article><h2>本地解析附件</h2>{files.length ? <div className="artifact-list">{files.map((file) => <a key={file.type} href={file.url} target="_blank" rel="noreferrer"><FileText size={18} /><span><strong>{file.label || artifactLabels[file.type] || file.type}</strong><small>{file.filename || file.type}</small></span><DownloadSimple size={17} /></a>)}</div> : <div className="artifact-empty"><FileMagnifyingGlass size={25} /><span><strong>暂无本地附件</strong><small>DotaReplayDesk 上传后才会出现，不生成无效链接。</small></span></div>}<div className="privacy-note"><ShieldCheck size={18} />附件可能包含玩家标识或游戏内聊天，链接公开可读。</div></article></div></section>;
+  return <section className="data-center"><div className="section-intro"><span>DATA PROVENANCE</span><h1>数据中心</h1><p>统一展示比赛基础数据、唯一解析结果和 DotaReplayDesk 附件。</p></div><div className="data-grid"><article><h2>当前比赛状态</h2><dl><div><dt>比赛 ID</dt><dd>{workspace?.match?.match_id || "—"}</dd></div><div><dt>统一解析状态</dt><dd>{status}</dd></div><div><dt>结果来源</dt><dd>{source}</dd></div><div><dt>历史画像</dt><dd>{workspace?.historical_profile?.status === "ready" ? "已缓存" : "按需计算"}</dd></div><div><dt>在线检测策略</dt><dd>{monitor?.dota_online ? "每1分钟" : "每10分钟"}</dd></div></dl>{parse.result_url && <a className="data-link" href={parse.result_url} target="_blank" rel="noreferrer"><FileText size={17} />打开统一解析 JSON<ArrowSquareOut size={14} /></a>}</article><article><h2>本地解析附件</h2>{files.length ? <div className="artifact-list">{files.map((file) => <a key={file.type} href={file.url} target="_blank" rel="noreferrer"><FileText size={18} /><span><strong>{file.label || artifactLabels[file.type] || file.type}</strong><small>{file.filename || file.type}</small></span><DownloadSimple size={17} /></a>)}</div> : <div className="artifact-empty"><FileMagnifyingGlass size={25} /><span><strong>暂无本地附件</strong><small>DotaReplayDesk 上传后才会出现，不生成无效链接。</small></span></div>}<div className="privacy-note"><ShieldCheck size={18} />附件可能包含玩家标识或游戏内聊天，链接公开可读。</div></article></div></section>;
 }
 
 const formatBeijing = (timestamp) => {
@@ -924,7 +924,7 @@ function App() {
       try {
         const response = await fetch("/dota2/api/monitor/status", { cache: "no-store" });
         if (response.ok && !stopped) { const data = await response.json(); online = data.dota_online === true; setMonitor(data); }
-      } finally { if (!stopped) timer = window.setTimeout(refresh, online ? 10000 : 600000); }
+      } finally { if (!stopped) timer = window.setTimeout(refresh, online ? 60000 : 600000); }
     };
     refresh(); return () => { stopped = true; window.clearTimeout(timer); };
   }, []);

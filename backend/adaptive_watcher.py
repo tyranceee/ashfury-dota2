@@ -15,7 +15,10 @@ STEAM_ID64 = os.environ.get("DOTA_STEAM_ID64", "76561198172387195")
 STEAM_WEB_API_KEY = os.environ.get("STEAM_WEB_API_KEY", "")
 
 PRESENCE_INTERVAL = int(os.environ.get("PRESENCE_POLL_SECONDS", "600"))
-RESULT_INTERVAL = int(os.environ.get("RESULT_POLL_SECONDS", "10"))
+# How often to ask OpenDota for the latest match while Dota is running.
+# This only affects how quickly a new match is *discovered*; parse latency
+# is governed separately by PARSE_CHECK_INTERVAL.
+RESULT_INTERVAL = int(os.environ.get("RESULT_POLL_SECONDS", "60"))
 OFFLINE_RESULT_INTERVAL = int(os.environ.get(
     "OFFLINE_RESULT_POLL_SECONDS", str(PRESENCE_INTERVAL)
 ))

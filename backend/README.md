@@ -3,7 +3,7 @@
 生产方案：
 
 - Steam Web API 每 600 秒检查目标账号是否正在运行 AppID 570；
-- 仅在 Dota 在线时，每 10 秒查询 OpenDota 最新 Match ID；
+- 仅在 Dota 在线时，每 60 秒查询 OpenDota 最新 Match ID；
 - 新 Match ID 只登记一次，先保留 1 小时 DotaReplayDesk 本地上传窗口；
 - 本地解析完整上传后立即标记为已解析，并跳过 OpenDota Parse；
 - 1 小时后仍未解析时，最多提交一次 OpenDota Parse；提交后每 600 秒同步结果状态，绝不重复提交；
