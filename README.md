@@ -9,6 +9,24 @@ Private source repository for the Dota 2 section of `ashfury.cn`.
 - `valve-monitor/` — experimental Valve/GC monitor and its tests.
 - `docs/` — data-boundary, DotaReplayDesk integration, historical-profile, and owner-review design notes.
 
+## Match review skill
+
+The [open-source match review skill](skills/dota2-deep-match-review-open-source/README.md)
+provides evidence-driven single-match analysis, cooperative review, and focused
+follow-ups. Its entry point is
+[SKILL.md](skills/dota2-deep-match-review-open-source/SKILL.md).
+
+Install by copying `skills/dota2-deep-match-review-open-source` into your Codex
+skills directory. Match data, accounts, and service addresses come from your own
+project configuration. The skill does not deploy the website or include the
+separate review publisher.
+
+Run its offline checks with:
+
+```bash
+python3 -m unittest discover -s skills/dota2-deep-match-review-open-source/tests -q
+```
+
 ## Local checks
 
 Frontend:
