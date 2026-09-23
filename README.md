@@ -12,8 +12,8 @@ Private source repository for the Dota 2 section of `ashfury.cn`.
 ## Match review skill
 
 The [open-source match review skill](skills/dota2-deep-match-review-open-source/README.md)
-provides evidence-driven single-match analysis, cooperative review, and focused
-follow-ups. Its entry point is
+provides evidence-driven full-match reviews and focused follow-ups. Its entry
+point is
 [SKILL.md](skills/dota2-deep-match-review-open-source/SKILL.md).
 
 Install by copying `skills/dota2-deep-match-review-open-source` into your Codex

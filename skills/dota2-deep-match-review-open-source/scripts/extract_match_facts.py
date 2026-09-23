@@ -53,7 +53,7 @@ EVIDENCE_MARKERS = (
 SCHEMA_VERSION = 2
 RESOURCE_CATEGORIES = ("damage_targets", "buildings", "roshan", "buybacks")
 SECTION_TITLES = (
-    "全局博弈", "比赛结论与数据边界", "阵容与三路对线", "节奏与关键团战",
+    "全局博弈", "比赛结论与数据边界", "阵容与三路对线", "团队策略分析", "节奏与关键团战",
     "装备与技能决策", "十人职责与用户死亡", "本人对局改进意见",
 )
 LEGACY_SECTION_TITLES = (
@@ -904,7 +904,7 @@ def validate_markdown(review_text: str | None, match_id: Any) -> list[str]:
     for title in titles:
         candidates = [(i, match) for i, match in enumerate(headings) if title in match.group(1)]
         if candidates:
-            # A subsection can repeat its parent's name after cooperative merging.
+            # A subsection can repeat its parent's name in a nested report.
             outer_level = min(len(match.group(0).split()[0]) for _, match in candidates)
             candidates = [(i, match) for i, match in candidates
                           if len(match.group(0).split()[0]) == outer_level]

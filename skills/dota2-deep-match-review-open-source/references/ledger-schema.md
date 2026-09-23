@@ -24,7 +24,6 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 - `analysis`：待填写的实际分析记录。
 - `equipment_analysis_template`：逐件装备与持盾审计。
 - `supplemental_sources`：可选的日志片段、录像观察或玩家复述。
-- `preliminary_review`：收到初评时可手工加入的接收与核验记录，格式见 [preliminary-review.md](preliminary-review.md)。它不属于事实来源、不参与机器完成计数；版本2门禁不会审计其内部内容，必须人工检查。
 - `analysis_coverage_template`：旧版展示字段，机器忽略其中的自报数量与状态。
 
 账本包含原始数据与玩家标识，作为本地工作文件保存；公开发布只交接脱敏后的 Markdown。
@@ -57,7 +56,7 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 
 `refs` 使用 JSON Pointer，指向账本中的 `/source_match/...` 或 `/supplemental_sources/...`。数组下标从0开始。引用必须实际可解析，不得引用自己的分析段落来证明自己。多个独立事实支持概率推断时应分别引用；引用存在不代表它支持结论，仍须人工核对语义。
 
-不得引用 `/preliminary_review/...` 或初评 Markdown 来证明比赛事实；不得把模型正文改标为 `event_log`、`replay` 或 `player_recollection` 塞入 `supplemental_sources`。初评指出的原始字段、玩家原话或网页只能作为检索线索，实际取得并核验后再按真实来源记录。两个模型对同一数据得出相同观点，不是两项独立证据。
+不得引用模型分析正文来证明比赛事实，也不得把模型正文改标为 `event_log`、`replay` 或 `player_recollection` 塞入 `supplemental_sources`。实际取得并核验原始字段、玩家原话或网页后，按真实来源记录。两个模型对同一数据得出相同观点，不是两项独立证据。
 
 全局与单波博弈的 `judgment` 必须属于模型判断、具充分证据的高概率推断或经验估计，不能使用“数据明确显示”表达整个战术假设。
 
@@ -84,7 +83,7 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 - 证据至少引用一条落在该时间窗内的事件或与其重叠的原始团战窗口；只引用英雄编号不能证明该波战斗存在。补充来源用作时间锚点时，必须是 `event_log` 或 `replay`，`time_basis` 为 `game_seconds`，引用对象包含数值 `time` 或 `start/end`。玩家回忆可补充语境，不能代替事件时间锚点。
 - `global_gameplan_ids`：所检验的全局博弈 ID 数组；有关键团战时，每个全局博弈至少关联一波。
 - `pre_fight`、`engagement`、`first_phase`、`second_phase`：战前、开团、第一与第二阶段；无法分阶段时写明证据限制。
-- `engine_enabler`：发动机与赋能者关系。
+- `engine_enabler`：团队发动机与持续输出点的协作关系；内部字段名保留，正文统一使用“团队发动机”称呼创造团队行动条件的英雄。
 - `resolution`、`map_conversion`、`contribution_and_error`：收尾、地图转化、主要贡献和失误。 `contribution_and_error` 中同时记录用户英雄的本波表现判断及依据，原始引用须能定位本人窗口记录；正文逐波呈现本人数据、职责与后果，不能仅用整场个人结论替代。
 
 每波 `core_question` 只能是一个字符串，正文也只能突出一个核心命题。机器无法判断一个字符串是否暗藏多个并列命题，须在成稿语义核验时检查。
@@ -92,6 +91,8 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 最终正文每波使用 `<!-- review-fight: ID -->` 标记，ID 与 `analysis.decisive_fights[].id` 一一对应且唯一。标记后放包含“天辉 X : Y 夜魇”本波英雄击杀数的标题，紧接参战数据表，再写“团战分析”“本人本波表现”和“本波总结”；列名与口径执行 full-review 模板。final 阶段检查逐波结构，draft 阶段仍检查原始分析字段。结构通过不证明数值、英雄映射或分析深度正确，须另做语义验收。
 
 通常选择3—5波。实际数量在范围外时，填写 `analysis.fight_selection`：`reason`、`timeline_crosscheck`、`evidence`。须检查全局击杀、经济/经验与目标记录，说明确实不足或为什么必须多选；不能只因为解析器只列一波就假定只发生一波。零波时用全局计划内的实际事件检验博弈，并解释为什么没有决定性战斗。
+
+“团队策略分析”独立章使用各阶段原始曲线与事件作为依据，不写入赛前 `global_gameplans`，也不伪造成一波 `decisive_fights`。关键数值注明时点，战术判断注明模型判断；阶段覆盖、双方资源与行动策略由提交协议进行语义验收，章节通过不等于分析完成。
 
 ## 其他必需分析数组
 
@@ -110,9 +111,11 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 
 核心、辅助与团战的内容标准以 full-review 和 submission-protocol 的完整清单为准；本表负责记录形状，不能取代正文分析。`cores` / `supports` 使用上表全部字段；`detail` 可省略或为 `detailed`。`detail=brief` 不能通过完整复盘验收；需要完整过程分析，不能只改标签。六核各有过程与同位置比较，四辅助各有职责分析，正文不能仅引用账本证明自己已经展开。
 
-每条 `cores` / `supports` 的 `conclusion` 与其正文个人段落一致：按该英雄所在队伍的实际胜负，胜方写贡献判断及依据，败方写过错判断及依据或具体的无法归责理由。账本保持 cores/supports 两类记录；正文按玩家实际阵营组织为天辉五段、夜魇五段，合计覆盖六核与四辅助，将职责字段、过程字段与 conclusion 合写为该英雄的一段完整评价，不分别渲染成十人职责与十人贡献两轮分析，也不以账本行或评分表代替个人分析。该项属于语义验收，字段齐全不证明评价合理。
+每条 `cores` / `supports` 的 `conclusion` 与其正文个人段落一致：按该英雄所在队伍的实际胜负，胜方写0—10分的贡献分及依据，败方写0—10分的过错分及依据，注明模型判断；资料不足时写具体的暂不评分理由，不能用0分替代未知。账本保持 cores/supports 两类记录；正文按玩家实际阵营组织为天辉五段、夜魇五段，各节按对应分数降序排列，同分并列，暂不评分者置后；合计覆盖六核与四辅助，将职责字段、过程字段与 conclusion 合写为该英雄的一段完整评价，不分别渲染成十人职责与十人贡献两轮分析，也不以账本行或评分表代替个人分析。该项属于语义验收，字段齐全不证明评价合理。
 
 `window_analysis` 记录实际重要窗口及能力、使用证据、结果；没有相关事件时说明已查范围和限制，不要求一好一坏。兼容旧技能记录同时具备 `high_value_window` 与 `low_or_unrecorded_window`；新旧格式同时存在时以新字段验收，不用旧内容绕过新字段空白。
+
+四条 `supports` 的 `equipment_fit` 同时记录资源分配判断：同期敌我辅助资源与己方核心缺口、收益来源、核心可获取性、关键窗口代价及团队转化，具体方法执行 full-review 的辅助资源占用审计。将有证据的判断纳入 `conclusion` 及评分，原始引用定位相应时段；“己方落后而辅助更富”只能触发排查，不能单独证明抢资源。字段存在不证明已完成因果核验，该项还需语义验收。
 
 `training` 为内部记录键，正文展示为“本人对局改进意见”。使用公共 id/status/evidence；signal 交代用户本场具体时点、选择与信号，action 写本人可执行的替代处理，tradeoff 写代价，正文补明原选择后果并与记录一致。本人改进记录为必填内容，不得以改动源数据或版本号替代。
 
@@ -131,6 +134,8 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 十条 `player_item_audits` 均填 `player_index`, `role`, `build_conclusion`, `resource_fit`, `evidence_level`, `evidence`。`detail` 可省略或为 detailed，每人至少分析一件实际关键装备，并覆盖所有改变战斗结构的关键取舍；不能以 brief 或空列表跳过。路线分析解释能力顺序、相关战斗与目标结果。每人“最佳决定/最大问题”不强制填写；旧字段可保留。
 
 每件 `key_items` 必填：`item`, `purchase_time`, `component_flow`, `capability_or_tradeoff`, `alternative_and_cost`, `targeting`, `prior_fight`, `first_relevant_fight`, `use_evidence`, `fight_outcome`, `team_enabling`, `map_conversion`, `window_judgment`, `evidence_level`, `evidence`。`alternative_and_cost` 必须比较一个现实替代与代价，原路线合理时说明替代为何更差；证据不足则说明具体缺口。此字段不可省略。其他字段对应装备参考中的组件流、购买前后战斗和因果链。
+
+圣剑的 `key_items` 记录执行装备参考中的完整决策分析：在 `capability_or_tradeoff`、`targeting` 说明当时的输出需求与持有者自身保剑条件，在 `team_enabling` 说明队友当时可用的保护与终结协作，在 `alternative_and_cost` 比较现实替代，并说明稳健路线剩余胜机、圣剑争取的更高回报、成功门槛与失败代价。`window_judgment` 明确购买当时的保剑、终结能力及是否需要冒险争取胜机的裁决和条件；`fight_outcome`、`map_conversion` 单独记录后续实际结果，不用这些结果反填决策前提。引用应能定位购买前/当时局势与后续事件各自的来源；分析字段齐全不证明已避免事后倒推，须做语义检查。
 
 `bkb_player_audits` 每个确认持有者填 `player_index`, `purchase_time`, `window_analysis`, `conclusion`, `evidence_level`, `evidence`。仅分析实际重要窗口，不凑低价值样本。兼容旧记录同时具备 `high_value_window` 和 `low_value_or_uncovered_window`；新记录使用 `window_analysis`。
 
@@ -158,4 +163,4 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 
 缺字段、无效或重复主体、计数不足、无效来源引用、缺少单波命题、部分解析、待定栏目、空白交付章节都会阻止完整复盘门禁。正常不适用和带具体理由的局部证据限制可以记录；不能把这些机制当作省略分析的通道。
 
-正文使用提交协议的七章节标题与顺序，旧15章结构保留兼容检查。包含准确 Match ID，不能只有标题。最后必须人工核对事实支撑、局部限制、中文名称、单一核心博弈、章节与账本一致性。机器验收不是战术正确性、证据因果关系或无幻觉的证明。
+正文使用提交协议的八章节标题与顺序，旧15章结构保留兼容检查。包含准确 Match ID，不能只有标题。最后必须人工核对事实支撑、局部限制、中文名称、单一核心博弈、章节与账本一致性。机器验收不是战术正确性、证据因果关系或无幻觉的证明。

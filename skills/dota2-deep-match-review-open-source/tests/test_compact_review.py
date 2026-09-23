@@ -1,11 +1,7 @@
 """Compact output must reduce repetition without bypassing identity or evidence gates."""
-import re
 import unittest
 
 from test_extract_match_facts import MODULE as facts, complete_ledger, review_markdown
-import test_cooperative_review as cooperative_tests
-
-coop = cooperative_tests.coop
 
 
 def use_brief_records(ledger):
@@ -28,7 +24,7 @@ def use_brief_records(ledger):
 class CompactStandaloneTests(unittest.TestCase):
     def test_gameplan_first_layout_passes_with_full_underlying_coverage(self):
         ledger = complete_ledger()
-        self.assertEqual(len(facts.SECTION_TITLES), 7)
+        self.assertEqual(len(facts.SECTION_TITLES), 8)
         self.assertEqual(facts.SECTION_TITLES[0], "全局博弈")
         self.assertEqual(facts.validate_coverage(ledger, "final", review_markdown()), [])
 
@@ -36,6 +32,16 @@ class CompactStandaloneTests(unittest.TestCase):
         report = "比赛 1\n\n" + "\n\n".join("## " + title + "\n\n合成测试正文。"
                                                 for title in facts.LEGACY_SECTION_TITLES)
         self.assertEqual(facts.validate_markdown(report, 1), [])
+
+    def test_strategy_is_required_as_peer_chapter_before_fights(self):
+        sections = ["## " + title + "\n\n合成测试正文。" for title in facts.SECTION_TITLES]
+        strategy = next(s for s in sections if "团队策略分析" in s)
+        missing = [s for s in sections if s != strategy]
+        nested = [s.replace("## 团队策略分析", "### 团队策略分析") for s in sections]
+        after_fights = missing[:4] + [strategy] + missing[4:]
+        for variant in (missing, nested, after_fights):
+            with self.subTest(variant=variant):
+                self.assertTrue(facts.validate_markdown("比赛 1\n\n" + "\n\n".join(variant), 1))
 
     def test_old_fragment_heading_does_not_switch_new_report_to_legacy_mode(self):
         report = review_markdown().replace("合成测试正文。", "### 比赛结论与用户概览\n\n合成测试正文。", 1)
@@ -156,56 +162,6 @@ class CompactStandaloneTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertTrue(facts.validate_coverage(ledger, "draft"))
 
-
-class CompactCooperativeTests(unittest.TestCase):
-    # Reuse fixture setup without inheriting or rerunning its test methods.
-    setUp = cooperative_tests.CooperativeTests.setUp
-    completed = cooperative_tests.CooperativeTests.completed
-
-    def test_assembly_has_gameplan_first_and_eleven_audit_entries(self):
-        audit = self.completed()
-        final = coop.assemble(audit, self.replacements)
-        self.assertEqual(re.findall(r"^## (.+)$", final, re.M), list(facts.SECTION_TITLES))
-        self.assertEqual(len(audit["sections"]), 11)
-        self.assertLess(final.index("### gameplan"), final.index("## 比赛结论与数据边界"))
-        self.assertEqual(facts.validate_markdown(final, 1), [])
-        for key in coop.SECTIONS:
-            self.assertIn("### " + key, final)
-        self.assertNotIn("handoff", final)
-
-    def test_old_base_without_gameplan_accepts_reviewed_new_first_chapter(self):
-        self.base.write_text("<!-- match_id=1 -->\n" + cooperative_tests.markdown(coop.BASE_SECTIONS),
-                             encoding="utf-8")
-        self.audit = coop.prepare(self.match, self.base, 1000)
-        audit = self.completed()
-        final = coop.assemble(audit, self.replacements)
-        self.assertEqual(re.findall(r"^## (.+)$", final, re.M)[0], "全局博弈")
-        without = self.replacements.replace(cooperative_tests.markdown(["gameplan"], "重写").strip(), "")
-        self.assertTrue(coop.validate(audit, without)[0])
-
-    def test_chinese_gameplan_heading_survives_merge_and_validation(self):
-        replacements = self.replacements.replace("## gameplan", "## 全局博弈")
-        final = coop.assemble(self.completed(), replacements)
-        self.assertEqual(facts.validate_markdown(final, 1), [])
-
-    def test_title_normalization_preserves_nested_prose_and_fences(self):
-        body = "# 原片段\n\n正文\n\n## 子标题\n\n```md\n# 代码中的标题\n```\n"
-        normalized = coop.nest_section(body)
-        self.assertIn("### 原片段", normalized)
-        self.assertIn("#### 子标题", normalized)
-        self.assertIn("```md\n# 代码中的标题\n```", normalized)
-        with self.assertRaises(ValueError):
-            coop.nest_section("# 原片段\n\n###### 超深子标题\n正文")
-
-    def test_cooperative_training_is_bounded_and_evidenced(self):
-        for count in (0, 4):
-            audit = self.completed()
-            audit["training_items"] *= count
-            with self.subTest(count=count):
-                self.assertTrue(coop.validate(audit, self.replacements)[0])
-        audit = self.completed()
-        audit["training_items"][0]["evidence"]["refs"] = ["/analysis/own_conclusion"]
-        self.assertTrue(coop.validate(audit, self.replacements)[0])
 
 
 if __name__ == "__main__":

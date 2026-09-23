@@ -2,7 +2,6 @@
 import unittest
 
 from test_extract_match_facts import MODULE as facts, complete_ledger, review_markdown, fight_report
-import test_cooperative_review as cooperative_tests
 
 
 class FightTableTests(unittest.TestCase):
@@ -117,37 +116,6 @@ class FightTableTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertTrue(any(field in error for error in facts.validate_coverage(ledger, 'draft')))
 
-
-class CooperativeFightTests(unittest.TestCase):
-    def setUp(self):
-        self.fixture = cooperative_tests.CooperativeTests()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
-
-    def test_cooperative_requires_table_and_preserves_it_on_merge(self):
-        fixture = self.fixture
-        audit = fixture.completed()
-        errors, _, _ = cooperative_tests.coop.validate(audit, fixture.replacements)
-        self.assertEqual(errors, [])
-        merged = cooperative_tests.coop.assemble(audit, fixture.replacements)
-        self.assertIn('<!-- review-fight: fight-1 -->', merged)
-        self.assertEqual(facts.validate_fight_tables(merged, ['fight-1']), [])
-        without = '\n'.join(line for line in fixture.replacements.splitlines() if not line.startswith('|'))
-        errors, _, _ = cooperative_tests.coop.validate(audit, without)
-        self.assertTrue(any('table' in error for error in errors))
-
-    def test_cooperative_zero_fight_exception_requires_evidence(self):
-        fixture = self.fixture
-        audit = fixture.completed()
-        replacements = fixture.replacements.replace(fight_report(), '全时间轴未确认决定性团战，测试示例。')
-        self.assertTrue(cooperative_tests.coop.validate(audit, replacements)[0])
-        audit['fight_selection'] = {'selected_count': 0}
-        self.assertTrue(cooperative_tests.coop.validate(audit, replacements)[0])
-        audit['fight_selection'].update(reason='合成测试：没有决定性战斗。',
-            timeline_crosscheck='合成测试：已交叉检查完整事件时间轴。',
-            evidence=cooperative_tests.evidence())
-        self.assertEqual(cooperative_tests.coop.validate(audit, replacements)[0], [])
-        self.assertTrue(cooperative_tests.coop.validate(audit, fixture.replacements)[0])
 
 
 if __name__ == '__main__':

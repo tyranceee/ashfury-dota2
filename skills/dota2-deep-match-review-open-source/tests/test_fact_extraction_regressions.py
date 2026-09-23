@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from test_extract_match_facts import MODULE as facts, synthetic_match
-from test_cooperative_review import coop
 
 
 class ExtractionRegressions(unittest.TestCase):
@@ -75,19 +74,13 @@ class ExtractionRegressions(unittest.TestCase):
         self.assertEqual(ledger["players"][0]["purchases"], [])
         self.assertIn(0, ledger["equipment_analysis_template"]["required_bkb_player_indices"])
 
-    def test_cooperative_index_preserves_death_source_and_aligned_samples(self):
-        match = synthetic_match()
-        match["players"][0].update(times=[-60, 0, 300], gold_t=[10, 20, 500],
-                                  deaths_log=[{"time": 45, "key": "neutral"}])
-        row = coop.compact_index(match, 1000)["players"][0]
-        self.assertEqual(row["minute_samples"]["0"]["gold"], 20)
-        self.assertEqual(row["minute_samples"]["5"]["gold"], 500)
-        self.assertEqual(row["event_index"]["deaths_log"][0]["ref"],
-                         "/source_match/players/0/deaths_log/0")
-
-    def test_missing_curves_do_not_fill_compact_index_with_empty_samples(self):
-        row = coop.compact_index(synthetic_match(), 1000)["players"][0]
-        self.assertEqual(row["minute_samples"], {})
+    def test_strategy_35_minute_snapshot_uses_actual_times(self):
+        player = {"times": [0, 2100], "gold_t": [0, 15000], "xp_t": [0, 18000]}
+        points = facts.minute_points(player)
+        self.assertEqual(points["35"]["gold"], 15000)
+        self.assertEqual(points["35"]["xp"], 18000)
+        player["times"] = [0, 2090]
+        self.assertIsNone(facts.minute_points(player)["35"]["gold"])
 
     def test_chinese_equipment_heading_passes_final_structure_check(self):
         report = "# 比赛 1\n\n" + "\n\n".join(
