@@ -69,6 +69,7 @@ GAMEPLAN_FIELDS = (
 PRE_LANE_FIELDS = (
     "assumptions", "verdict", "mechanisms", "phase_windows", "radiant_plan", "dire_plan",
 )
+LANE_DIMENSIONS = ("economy", "experience", "last_hits", "kill_exchange", "action_conditions")
 RECORD_FIELDS = {
     "global_gameplans": GAMEPLAN_FIELDS,
     "decisive_fights": GAMEPLAN_FIELDS + (
@@ -76,7 +77,7 @@ RECORD_FIELDS = {
         "resolution", "map_conversion", "contribution_and_error",
     ),
     "lanes": ("matchup", "minute_5_10", "support_damage_0_6", "early_events",
-              "rotation_boundary", "minute_10_15", "first_tower", "conclusion", "expectation_vs_actual"),
+              "rotation_boundary", "minute_10_15", "minute_15_20", "first_tower", "conclusion", "expectation_vs_actual"),
     "support_lane_pressure": ("baseline_0", "cumulative_6", "net_damage", "lane_conversion"),
     "cores": ("role_basis", "primary_secondary_roles", "enable_and_limit", "economy_curve",
               "lane_and_recovery", "item_windows", "participation_and_targets", "key_skills",
@@ -872,6 +873,28 @@ def validate_evidence(evidence: Any, ledger: dict[str, Any], prefix: str) -> lis
     return missing
 
 
+def validate_lane_dimensions(record: Any, ledger: dict[str, Any], prefix: str) -> list[str]:
+    """Check separate claims and source references, never decide who won a lane."""
+    if not isinstance(record, dict):
+        return [f"{prefix}: object with five lane dimensions required"]
+    missing = []
+    if set(record) != set(LANE_DIMENSIONS):
+        missing.append(f"{prefix}: requires exactly {', '.join(LANE_DIMENSIONS)}")
+    for dimension in LANE_DIMENSIONS:
+        claim = record.get(dimension)
+        label = f"{prefix}.{dimension}"
+        if not isinstance(claim, dict):
+            missing.append(f"{label}: claim object required")
+            continue
+        require_fields(claim, ("verdict",), label, missing)
+        if type(claim.get("verdict")) not in (str, dict):
+            missing.append(f"{label}.verdict: statement or reasoned unavailable/not_applicable object required")
+        if not isinstance(claim.get("time_scope"), str) or not substantive(claim["time_scope"]):
+            missing.append(f"{label}.time_scope: substantive declared range required")
+        missing.extend(validate_evidence(claim.get("evidence"), ledger, label))
+    return missing
+
+
 def has_event_in_window(value: Any, start: float, end: float) -> bool:
     """Only explicit event times anchor a selected fight, not a generic player reference."""
     if isinstance(value, list):
@@ -1089,6 +1112,8 @@ def validate_coverage(ledger: dict[str, Any], stage: str = "final", review_text:
                 validate_windows(row, ("high_value_window", "low_or_unrecorded_window"), prefix, missing)
             missing.extend(validate_evidence(row.get("evidence"), ledger, prefix))
             if category == "lanes":
+                missing.extend(validate_lane_dimensions(row.get("actual_dimensions"), ledger,
+                                                        prefix + ".actual_dimensions"))
                 pre_lane = row.get("pre_lane")
                 if not isinstance(pre_lane, dict):
                     missing.append(f"{prefix}.pre_lane: theoretical matchup object required")

@@ -185,10 +185,20 @@ def complete_analysis(ledger):
     lane = {"matchup": "按样例英雄对应", "minute_5_10": "无法确认：样例无玩家曲线",
             "support_damage_0_6": "无法确认：样例无伤害曲线", "early_events": "已检查样例目标",
             "rotation_boundary": "无法确认：样例没有支援日志", "minute_10_15": "无法确认：样例无玩家曲线",
+            "minute_15_20": "无法确认：样例无玩家曲线，不能判断15—20分钟的恢复情况",
             "first_tower": "无法确认：样例无塔事件", "conclusion": "不从摘要推断对线优势",
             "expectation_vs_actual": "无法确认：样例没有对线曲线，不能判断是否兑现理论"}
     analysis["lanes"] = [row(key, lane) for key in ("top", "mid", "bottom")]
     for lane_row in analysis["lanes"]:
+        lane_row["actual_dimensions"] = {
+            dimension: {
+                "verdict": "无法确认：合成样例未提供该维度的个人曲线、对线事件或行动条件",
+                "time_scope": "0—20分钟；5/10/15/20分钟节点均缺相应个人记录",
+                "evidence": {**evidence("/source_match/players", judgment="无法确认"),
+                             "limitations": ["合成样例没有个人曲线、对线事件或行动条件记录"]},
+            }
+            for dimension in MODULE.LANE_DIMENSIONS
+        }
         # A structural fixture with hypothetical mechanisms, not a real matchup verdict.
         lane_row["pre_lane"] = {
             "assumptions": "假设双方同水平同资源，不计第三人干预；仅测试结构",

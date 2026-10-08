@@ -100,7 +100,7 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 
 | 数组 | 身份与数量 | 内容字段 |
 | --- | --- | --- |
-| `lanes` | 三条，ID 为 `top`、`mid`、`bottom` | `matchup`, `pre_lane`（下述对象）, `minute_5_10`, `support_damage_0_6`, `early_events`, `rotation_boundary`, `minute_10_15`, `first_tower`, `conclusion`, `expectation_vs_actual` |
+| `lanes` | 三条，ID 为 `top`、`mid`、`bottom` | `matchup`, `pre_lane`（下述对象）, `actual_dimensions`（下述五维对象）, `minute_5_10`, `support_damage_0_6`, `early_events`, `rotation_boundary`, `minute_10_15`, `minute_15_20`, `first_tower`, `conclusion`, `expectation_vs_actual` |
 | `support_lane_pressure` | 四条，`player_index` 对应四辅助 | `baseline_0`, `cumulative_6`, `net_damage`, `lane_conversion` |
 | `cores` | 六条，双方各三名，`player_index` 唯一 | `role_basis`, `primary_secondary_roles`, `enable_and_limit`, `economy_curve`, `lane_and_recovery`, `item_windows`, `participation_and_targets`, `key_skills`, `team_enabling`, `deaths_buybacks`, `map_conversion`, `conclusion`, `comparison` |
 | `supports` | 四条，与核心合计覆盖十名玩家一次 | `role_basis`, `lane_conversion`, `vision`, `control_and_saves`, `key_deaths`, `equipment_fit`, `conclusion` |
@@ -125,7 +125,33 @@ python scripts/extract_match_facts.py --check-ledger ledger.json --stage final -
 
 `expectation_vs_actual` 单独说明实际表现相对理论预期的偏差与原因，不可用 `conclusion` 中的实际输赢替代。三路均须填写 `pre_lane` 与 `expectation_vs_actual`，并保留原始数据。机器核验缺项、内容类型和判断标签，正文是否真正包含这三段、是否用了事后结果倒推及理论是否合理仍由人工语义核查。
 
+### 对线五维与过程记录
+
+每路 `actual_dimensions` 必须为对象，含 `economy`、`experience`、`last_hits`、`kill_exchange`、`action_conditions` 五个对象；分别对应经济、经验、补刀、击杀交换与实际行动条件。每项均填写 `verdict`（本维度判断）、`time_scope`（证据实际覆盖的时点或时段）和独立 `evidence`。五项不能以一个综合“线优”代替；未知按公共缺失格式写具体原因，并在 `evidence.limitations` 记录缺口，不借其他维度的来源装作已经核实。证据对象仍须符合来源与引用规范；没有对应事件时可引用被检查的实际资料说明缺失，但不能称其证明未发生。
+
+`minute_5_10`、`minute_10_15`、`minute_15_20` 合起来记录双方5/10/15/20分钟经济与经验的原值、差值、阶段增量及口径；缺节点和比赛未到节点分别记录，不能用总表只有经济的旧记录宣称经验也已核对。`rotation_boundary` 记录纯对线、支援与离线成长的实际边界或缺口，字段名中的分钟范围不是纯对线的固定边界。争议时在对应过程字段记录逐分钟核对区间、真实样本、转折及缺失，`early_events` 对照死亡、支援等时序；原始来源引用应同时定位曲线、时间轴与相关事件。
+
+`conclusion` 综合五维结论时保留维度冲突和时段限定；用户主张的支持、冲突、未知及修正后的判断可记在此处。因果链与理论偏差放在 `expectation_vs_actual`，修正时注明受影响分析 ID 及已改结论，或为何不受影响；不重抄后续事件。完整复盘的旧账本须在原始事实不变的前提下补齐新增分析字段，不能删减旧字段、修改 `source_match` 或改变版本号规避检查。
+
+机器核验五维对象、判断/范围是否有内容及引用是否可解析，不判断“线优”“主要责任”是否成立，也不证明四节点和逐分钟核对真实完成；按 [对线结论的语义验收](submission-protocol.md#对线结论的语义验收) 逐项核实。专项沿用这些判读要求，可用短文或局部笔记记录，不强制创建三路账本或运行整场门禁。
+
 用户死亡不能用掉盾事件补足次数；来源未记录的实死需要补充日志，仍无法逐次确认时标明限制。`recorded_combatants` 记录可确认参战人数下限，不能用有伤害人数直接声称实际少打多。
+
+## 过程核验的记录位置
+
+以下分析沿用版本2记录，不删除任何既有必填字段或降低覆盖数量。正文按八章节组织，方法细节以 full-review、role-and-gameplan 和 equipment-review 为准；这些内容属于必查的语义要求，机器字段通过不能代替逐项核验。
+
+| 分析内容 | 记录与证据位置 |
+| --- | --- |
+| 战前准备与前置因果 | `decisive_fights.pre_fight` 记录相关准备、时间与接战条件；`decision_quality`、`contribution_and_error` 区分前置选择、受迫应对及本波独立错误。证据同时定位准备事件与战斗，`start/end` 仍为本波真实战斗窗口，不为追因而扩大参战统计边界 |
+| 非战斗机会窗口 | 在相关 `resource_categories.finding/consequence`、核心 `map_conversion/team_enabling` 或辅助职责记录中保存事件时间、窗口条件、现实选项、实际行动、关闭原因与收益/代价。用于检验全局博弈时仅写入其实战对照字段，不回填赛前推演；正文使用独立的非战斗事件编号，不占用 `decisive_fights`、团战标记或团战数量 |
+| 团队资源分配与可用能力 | 核心 `economy_curve`、`item_windows`、`enable_and_limit`、`team_enabling` 及辅助 `equipment_fit` 记录各自资源选择与后果。共享方案放在团队策略正文并指明原始曲线/事件；同一金币、装备或救援不能在互斥方案中同时当作已具备资源 |
+| 十人技能成长 | 六核 `key_skills`、四辅助 `control_and_saves` 记录各自可确认的成长选择、关键窗口影响或具体限制；重要技能的 `key_skills.window_analysis/synergy` 及相关装备记录补充机制与协同。升级顺序、时间和机制依据分别记录，引用可追溯到实际来源；不替代原有释放/使用与效果分析 |
+| 买活战略周期 | `resource_categories` 的 `buybacks` 条目统筹重要买活选择；核心 `deaths_buybacks`、相关团战和 `user_deaths` 保存预留、购买时机、回场条件、实际收益与后续风险，装备记录解释经济取舍。未买活的判断也需要当时条件证据，不能从最终金钱补造可用余额 |
+| 信息与替代方案 | `decision_quality` 区分已知、可推知与事后信息；`adjustment`、装备 `alternative_and_cost`、死亡 `alternative` 及本人改进 `action/tradeoff` 记录合理敌方应对、协同要求与退路。关键未知及其影响写入 `counterevidence` 或 `evidence.limitations` |
+| 责任去重与评分稳定性 | 核心/辅助 `conclusion`、团战 `contribution_and_error` 连接同一条因果链中的独立选择及连续后果；评分依据说明关键未知是否改变判断和名次，实际损失与责任不重复计算。正文在各人的唯一段落交代，不另输出一套评分 |
+
+一处主记录可供其他分析引用，但各记录仍保留支持自己结论的原始来源引用。非战斗窗口或成长路线证据不足时注明已查范围和影响；不能用虚构事件或补充来源掩盖缺口，也不能因细节缺失删减已有可完成的团战、职责和装备分析。
 
 ## 装备记录
 
